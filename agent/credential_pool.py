@@ -6,6 +6,7 @@ from agent.credential_pool_admin import CredentialPoolAdminMixin
 from agent.credential_pool_model_cooldowns import CredentialPoolModelCooldownMixin, model_cooldown_until
 from agent.credential_pool_timestamps import _parse_absolute_timestamp
 
+import contextlib
 import logging
 import os
 import random
@@ -1505,7 +1506,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         # there was no recovery path at all). Serialize through the shared
         # cross-process auth-store flock; a waiter's in-lock re-sync picks up
         # the winner's rotated token and skips the POST.
-        with _auth_store_lock(timeout_seconds=self._single_use_refresh_lock_timeout()):
+        with _auth_store_lock(timeout_seconds=self._single_use_refresh_lock_timeout()), \
+                self._borrowed_root_refresh_lock(entry):
             if self.provider == "openai-codex":
                 synced = self._sync_entry_from_auth_store(entry)
                 if synced is not entry and not force and not self._entry_needs_refresh(synced):
@@ -1530,6 +1532,18 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             if synced.access_token != entry.access_token or synced.refresh_token != entry.refresh_token:
                 return synced
             return self._refresh_entry_impl(synced, force=force)
+
+    def _borrowed_root_refresh_lock(self, entry: PooledCredential):
+        """Root auth-store lock (inner) when *entry* is a row this profile borrows from root.
+
+        Every borrowing profile refreshes the same root token, but the outer lock only covers the
+        profile's own auth.json, so two profiles could POST one single-use refresh token and get
+        the whole grant revoked. claude_code rows already serialize on their shared-file lock.
+        """
+        root = _borrowed_single_use_pool_root()
+        if root is None or entry.source == "claude_code" or entry.id not in self._borrowed_root_ids:
+            return contextlib.nullcontext()
+        return _auth_store_lock(timeout_seconds=self._single_use_refresh_lock_timeout(), target_path=root)
 
     def _claude_code_credentials_lock(self):
         """Cross-process lock keyed to the shared claude_code credentials file.

@@ -983,3 +983,32 @@ def test_terminal_verdict_for_current_token_generation_still_persists(fleet):
     assert row["refresh_token"] == "sk-ant-ort-RT0"
     assert row["last_status"] == STATUS_DEAD
     assert pool.select() is None
+
+
+def test_borrowed_root_refresh_holds_the_root_store_lock(fleet, monkeypatch):
+    """Sibling profiles share root's single-use token: the refresh POST must run under ROOT's lock,
+    not only the borrowing profile's, or two profiles redeem one refresh token and lose the grant."""
+    import fcntl
+    from agent.credential_pool import load_pool
+
+    forge = _profile(fleet, "forge")
+    fleet["use"](forge)
+    seen = []
+    real_urlopen = urllib.request.urlopen
+
+    def probing_urlopen(req, timeout=None):
+        # flock is per open file description, so a fresh fd conflicts with the refresher's hold.
+        with open(fleet["root"] / "auth.lock", "a+") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fh, fcntl.LOCK_UN)
+                seen.append("free")
+            except BlockingIOError:
+                seen.append("held")
+        return real_urlopen(req, timeout=timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", probing_urlopen)
+    pool = load_pool("anthropic")
+    assert pool._borrowed_root_ids == {"abc123"}
+    assert pool.select() is not None
+    assert seen == ["held"], seen
