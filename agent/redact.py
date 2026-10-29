@@ -213,6 +213,10 @@ _PREFIX_PATTERNS = [
     r"glwt-[A-Za-z0-9_\-]{10,}",        # GitLab workspace token
     r"GR1348941[A-Za-z0-9_\-]{10,}",    # GitLab legacy runner registration token
     r"pk-lf-[A-Za-z0-9\-]{8,}",         # Langfuse public key (sk-lf- already covered by sk- pattern)
+    # Fly.io macaroons: standard base64 bodies (``+``/``/``/``=``), comma-joined when several are presented.
+    r"FlyV1 [A-Za-z0-9+/=_,-]{20,}",    # Fly.io auth header value (whole comma-joined token list)
+    r"fm2_[A-Za-z0-9+/=_-]{20,}",       # Fly.io macaroon
+    r"fo1_[A-Za-z0-9+/=_-]{20,}",       # Fly.io OAuth token
 ]
 
 # ENV assignment: KEY=value where KEY carries a secret-like name. Uppercase keys
