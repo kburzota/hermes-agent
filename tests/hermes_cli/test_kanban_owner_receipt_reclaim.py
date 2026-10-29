@@ -187,7 +187,7 @@ def test_dead_attempt_behind_an_unresolved_receipt_is_named_and_reclaimed(board)
          worker_fingerprint=kbd._process_fingerprint(os.getpid())),                          # live bound interpreter
     dict(heartbeat_age=300),                                                                 # fresh heartbeat
     dict(expires_age_seconds=-3600),                                                         # live claim
-    dict(lock_host="some-other-host"),                                                       # foreign host
+    dict(lock_host="some-other-host", expires_age_seconds=60),                               # foreign host, inside the alias grace
     dict(owner_pid=os.getpid(), owner_birth=None),                                           # live, uncomparable owner
     dict(record_worker_pid=False),                                                           # no pid recorded
 ], ids=["live-worker", "live-bound", "fresh-heartbeat", "live-claim", "foreign-host", "live-owner", "no-pid"])

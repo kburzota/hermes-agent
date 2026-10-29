@@ -53,7 +53,7 @@ def _latest_run_event(conn, task_id, kind):
 def _host_local_lock(lock) -> bool:
     """True when ``lock`` was issued by this host — the only pids we can judge."""
     from hermes_cli import kanban_db as kb
-    return bool(lock) and str(lock).startswith(kb._host_prefix())
+    return bool(lock) and kb._lock_is_local(lock)
 
 
 def bound_interpreter_gone(conn, task_id):
@@ -127,7 +127,8 @@ def owner_attempt_provably_over(conn, task_id) -> bool:
     row = conn.execute(
         "SELECT claim_lock, claim_expires, worker_pid, worker_started_at, last_heartbeat_at "
         "FROM tasks WHERE id=?", (task_id,)).fetchone()
-    if row is None or not _host_local_lock(row['claim_lock']):
+    if row is None or not (_host_local_lock(row['claim_lock'])
+                           or kb._host_alias_claim_reclaimable(conn, row['claim_expires'])):
         return False
     now = int(time.time())
     expires = kb._to_epoch(row['claim_expires'])

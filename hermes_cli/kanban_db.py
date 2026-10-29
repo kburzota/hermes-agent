@@ -15,6 +15,7 @@ locks). Schema: tasks, task_links, task_comments, task_events, task_runs, attach
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import re
@@ -1003,6 +1004,69 @@ def _claimer_id() -> str:
 def _host_prefix() -> str:
     """``"<host>:"`` prefix shared by every claim lock issued from this host."""
     return f"{_claimer_id().split(':', 1)[0]}:"
+
+
+@functools.lru_cache(maxsize=1)
+def _macos_host_names() -> tuple[str, ...]:
+    """macOS's HostName / LocalHostName / ComputerName: names this Mac has issued locks under.
+    shortcut: cached per process, so a rename lands at the next restart; the live
+    ``gethostname()`` is always checked too."""
+    if sys.platform != "darwin":
+        return ()
+    names = []
+    for key in ("HostName", "LocalHostName", "ComputerName"):
+        try:
+            out = subprocess.run(["scutil", "--get", key], capture_output=True, text=True, timeout=3,
+                                 check=False)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out.returncode == 0 and out.stdout.strip():
+            names.append(out.stdout.strip())
+    return tuple(names)
+
+
+def _lock_is_local(lock) -> bool:
+    """True when ``lock``'s host part is any name of this machine, with or without ``.local``:
+    a reboot can flip ``gethostname()`` between them (or to DHCP's name), and a lock issued
+    under the old name is still this machine's."""
+    host, sep, _ = str(lock or "").rpartition(":")
+    def bare(name):  # host names compare case-insensitively
+        return name.lower().removesuffix(".local")
+    return bool(sep) and bare(host) in {bare(n) for n in (_host_prefix()[:-1], *_macos_host_names())}
+
+
+# A claim expired this long whose pids are dead is this machine's to reclaim, whatever its host
+# says: kanban is single-host (a board's workers run beside its local DB), and a name we cannot
+# map (DHCP's) must not hold a card forever.
+HOST_ALIAS_RECLAIM_GRACE_SECONDS = 10 * 60
+_NETWORK_FSTYPES = ("nfs", "smbfs", "cifs", "afpfs", "webdav", "fuse", "9p", "ftp")
+
+
+def _db_on_local_disk(conn) -> bool:
+    """True when ``conn``'s main database file lives on a local (non-network) filesystem."""
+    import psutil
+    path = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
+    if not path:
+        return False  # in-memory: no file to place
+    path = os.path.realpath(path)
+    try:
+        mounts = [p for p in psutil.disk_partitions(all=True)
+                  if path == p.mountpoint or path.startswith(p.mountpoint.rstrip("/") + "/")]
+    except (OSError, psutil.Error):
+        return False
+    if not mounts:
+        return False
+    fstype = max(mounts, key=lambda p: len(p.mountpoint)).fstype.lower()
+    return not fstype.startswith(_NETWORK_FSTYPES)
+
+
+def _host_alias_claim_reclaimable(conn, claim_expires, now=None) -> bool:
+    """A non-local-looking claim expired past the grace on a board whose DB is on this disk.
+    Callers still prove every pid of the run dead before releasing it."""
+    expires = _to_epoch(claim_expires)
+    now = int(time.time()) if now is None else now
+    return (expires is not None and now - expires > HOST_ALIAS_RECLAIM_GRACE_SECONDS
+            and _db_on_local_disk(conn))
 
 
 # --- Task creation / mutation ---
@@ -2344,7 +2408,6 @@ def release_stale_claims(
     """
     now = int(time.time())
     reclaimed = 0
-    host_prefix = _host_prefix()
     stale = conn.execute(
         "SELECT id, claim_lock, worker_pid, worker_started_at, claim_expires, last_heartbeat_at, "
         "       assignee "
@@ -2356,14 +2419,16 @@ def release_stale_claims(
     for row in stale:
         if owner_reclaim_blocked(conn, row["id"]):
             continue
-        host_local = (row["claim_lock"] or "").startswith(host_prefix)
+        host_local = _lock_is_local(row["claim_lock"])
+        # Ours under a name we cannot map: we never signal it, so a live worker always keeps its claim.
+        alias = not host_local and _host_alias_claim_reclaimable(conn, row["claim_expires"], now)
         hb = _to_epoch(row["last_heartbeat_at"])
         # Backstop: a heartbeat older than the max-stale threshold means no
         # observable progress — reclaim even if the PID is alive (logic loop).
         heartbeat_stale = hb is not None and (now - hb) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
         started_at = _row_get(row, "worker_started_at")
-        if (host_local and row["worker_pid"] and _worker_alive(row["worker_pid"], started_at)
-                and not heartbeat_stale):
+        if ((host_local or alias) and row["worker_pid"] and _worker_alive(row["worker_pid"], started_at)
+                and (alias or not heartbeat_stale)):
             _extend_live_stale_claim(conn, row, now)
             continue
 
@@ -2404,6 +2469,7 @@ def release_stale_claims(
                     "last_heartbeat_at": hb,
                     "now": now,
                     "host_local": host_local,
+                    **({"reason": "expired_claim_dead_worker_host_alias"} if alias else {}),
                     "heartbeat_stale": bool(heartbeat_stale),
                     "retry_status": retry_status,
                 },

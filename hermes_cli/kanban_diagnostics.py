@@ -738,27 +738,25 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
 
 def _rule_stale_running(task, events, runs, now, cfg) -> list[Diagnostic]:
     """A ``running`` card whose claim expired >= cfg["stale_running_grace_seconds"]
-    (default 1h) ago with no live recorded worker.
+    (default 10 min) ago with no live recorded worker, whatever host the lock names.
 
     Nothing in the dispatcher is going to free this card — its reclaim paths can decline a
-    card whose owner receipt never resolved, and until they could not, the failure was
+    card whose owner receipt never resolved, or a lock issued under a hostname this machine
+    no longer reports — and until they could not, the failure was
     invisible: an operator saw only the cards queued behind the profile's worker cap. So the
     jam itself is the signal. Silent in every shape that can still progress: a live claim
-    (the owner is still working), a heartbeat inside the dispatcher's max-stale window, a
-    foreign host's lock (its pids say nothing here), or a live recorded worker. Read-only.
+    (the owner is still working), a heartbeat inside the grace, or a live recorded worker.
+    Read-only.
     """
-    grace_seconds = float(cfg.get("stale_running_grace_seconds", 60 * 60))
+    grace_seconds = float(cfg.get("stale_running_grace_seconds", 10 * 60))
     if _task_field(task, "status") != "running":
         return []
     from hermes_cli import kanban_db as kb
     expires = kb._to_epoch(_task_field(task, "claim_expires", None))
     if expires is None or (now - expires) < grace_seconds:
         return []
-    lock = str(_task_field(task, "claim_lock", "") or "")
-    if not lock.startswith(kb._host_prefix()):
-        return []
     hb = kb._to_epoch(_task_field(task, "last_heartbeat_at", None))
-    if hb is not None and (now - hb) <= kb.DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS:
+    if hb is not None and (now - hb) <= grace_seconds:
         return []
 
     from hermes_cli.kanban_db_dispatch import _worker_alive
@@ -793,7 +791,7 @@ def _rule_stale_running(task, events, runs, now, cfg) -> list[Diagnostic]:
         kind="stale_running", severity=severity,
         title=f"Running {age_str} past its expired claim with no live worker",
         detail=f"Nothing is executing this card and nothing has reclaimed it: the claim expired "
-               f"{age_str} ago, no heartbeat arrived inside the last hour, and no pid recorded for "
+               f"{age_str} ago, no heartbeat arrived since, and no pid recorded for "
                f"the run ({', '.join(str(p) for p in pids) or 'none'}) is alive. The dispatcher "
                f"declines a reclaim when the run's owner receipt never resolved, so the card can "
                f"hold its profile's worker slot indefinitely while every card queued behind it "
@@ -835,9 +833,8 @@ DEFAULT_CONFIG = {
     # the next dispatcher tick.
     "stranded_threshold_seconds": 30 * 60,
     # The dispatcher reclaims an expired claim on its own next tick, so a card
-    # still `running` an hour past its expiry means every reclaim path declined
-    # it. Same hour the heartbeat backstop uses.
-    "stale_running_grace_seconds": 60 * 60,
+    # still `running` 10 min past its expiry means every reclaim path declined it.
+    "stale_running_grace_seconds": 10 * 60,
 }
 
 
