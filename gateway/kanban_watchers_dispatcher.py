@@ -133,6 +133,8 @@ class _KanbanDispatcher:
         self.kb = kb
         self.settings = settings
         self.disabled_corrupt_boards: dict[str, tuple[tuple[str, int | None, int | None], float]] = {}
+        self._last_ready_nonempty = False
+        self._ready_probed_on_tick = False
 
     def _board_slugs(self) -> list:
         return _board_slugs(self.kb)
@@ -173,11 +175,13 @@ class _KanbanDispatcher:
         self.disabled_corrupt_boards.pop(slug, None)
         return True
 
-    def tick_once_for_board(self, slug: str) -> Optional[object]:
+    def tick_once_for_board(self, slug: str, *, probe_ready: bool = False) -> Optional[object]:
         """Run one dispatch_once for a specific board.
 
         The per-board DB is opened explicitly so boards never share a
-        connection or claim across each other.
+        connection or claim across each other. ``probe_ready`` reuses that
+        connection for the health-telemetry ready check so the watcher does
+        not open the same file a second time.
         """
         conn = None
         fingerprint = self.board_db_fingerprint(slug)
@@ -193,7 +197,10 @@ class _KanbanDispatcher:
             from hermes_cli import kanban_db as _kb
             with _kb.pin_first_board_resolution():
                 conn = _kbc().connect(board=slug)
-                return _kbd().dispatch_once(conn, board=slug, **kwargs)
+                result = _kbd().dispatch_once(conn, board=slug, **kwargs)
+                if probe_ready:
+                    self._note_ready(conn)
+                return result
         except Exception as exc:
             if self.is_corrupt_board_db_error(exc):
                 self.disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())
@@ -215,7 +222,24 @@ class _KanbanDispatcher:
 
     def tick_once(self) -> list[tuple[str, Optional[object]]]:
         """Run one dispatch_once per board. Returns (slug, result) pairs."""
-        return [(slug, self.tick_once_for_board(slug)) for slug in self._board_slugs()]
+        self._last_ready_nonempty = False
+        results = []
+        for slug in self._board_slugs():
+            need_probe = not self._last_ready_nonempty
+            results.append((slug, self.tick_once_for_board(slug, probe_ready=need_probe)))
+        self._ready_probed_on_tick = True
+        return results
+
+    def _note_ready(self, conn: sqlite3.Connection) -> None:
+        kbd = _kbd()
+        try:
+            ready = kbd.has_spawnable_ready(conn)
+            if not ready and kbd.review_dispatch_enabled():
+                ready = kbd.has_spawnable_review(conn)
+        except Exception:
+            return
+        if ready:
+            self._last_ready_nonempty = True
 
     def ready_nonempty(self) -> bool:
         """Is there a ready+assigned+unclaimed task on ANY board the dispatcher would spawn for?
@@ -225,7 +249,15 @@ class _KanbanDispatcher:
         "correctly idle", not "stuck". The review column is probed only when
         review dispatch is on (same gate as the dispatcher): a task waiting
         for a human reviewer is idle, not stuck.
+
+        After :meth:`tick_once` this is the probe taken on that tick's
+        connections (no second open). A standalone call still scans.
         """
+        if self._ready_probed_on_tick:
+            return self._last_ready_nonempty
+        return self._scan_ready_nonempty()
+
+    def _scan_ready_nonempty(self) -> bool:
         kbd = _kbd()
         _review_probe = kbd.review_dispatch_enabled()
         from hermes_cli import kanban_db as _kb
