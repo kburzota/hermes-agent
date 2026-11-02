@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import tempfile
 import time
 from pathlib import Path
@@ -256,6 +257,219 @@ def _seed_running_board(conn: Any, n: int, *, pid: int) -> None:
     conn.commit()
 
 
+def _temp_hermes_home() -> tuple[Path, str | None]:
+    home = Path(tempfile.mkdtemp(prefix="hermes-bench-prod-")) / ".hermes"
+    home.mkdir(parents=True)
+    previous = os.environ.get("HERMES_HOME")
+    os.environ["HERMES_HOME"] = str(home)
+    return home, previous
+
+
+def _restore_hermes_home(previous: str | None) -> None:
+    if previous is None:
+        os.environ.pop("HERMES_HOME", None)
+    else:
+        os.environ["HERMES_HOME"] = previous
+
+
+def host_liveness_scan(*, profiles: int = 43, repeats: int = 8) -> dict[str, float]:
+    """Desktop ``GET /api/profiles`` shape: one listing of N homes, each probing
+    gateway liveness (the production GIL storm on BIG-IRON).
+
+    The process is the host gateway (``record.pid == os.getpid()``). Before the
+    self-identify short-circuit, every cache miss dials ``identify_gateway``.
+    """
+    from gateway import host_attach
+    from gateway import host_rendezvous as hr
+    from hermes_cli import profiles as profiles_mod
+
+    home, previous = _temp_hermes_home()
+    (home / "config.yaml").write_text("model:\n  default: bench\n", encoding="utf-8")
+    names = ["default"]
+    for i in range(profiles - 1):
+        name = f"p{i:02d}"
+        names.append(name)
+        d = home / "profiles" / name
+        d.mkdir(parents=True)
+        (d / "config.yaml").write_text("model:\n  default: bench\n", encoding="utf-8")
+        (d / "SOUL.md").write_text("bench\n", encoding="utf-8")
+    (home / "gateway_state.json").write_text(
+        json.dumps({
+            "pid": os.getpid(),
+            "kind": "hermes-gateway",
+            "hermes_home": str(home),
+            "gateway_state": "running",
+            "served_profiles": names,
+        }),
+        encoding="utf-8",
+    )
+
+    identifies = {"n": 0}
+
+    def counting_identify(dialled, **kwargs):
+        identifies["n"] += 1
+        return {
+            "pid": os.getpid(),
+            "hermes_home": str(home),
+            "served_profiles": names,
+            "profile": "default",
+        }
+
+    record = hr.HostRecord(
+        role=hr.ROLE_GATEWAY,
+        pid=os.getpid(),
+        create_time=time.time(),
+        host="",
+        port=None,
+        protocol_version=hr.HOST_PROTOCOL_VERSION,
+        token_fingerprint="",
+        profiles=tuple(names),
+        updated_at="",
+        home=str(home),
+    )
+    original_identify = None
+    original_read = hr.read_record
+    original_live = hr.record_names_live_owner
+    try:
+        from gateway import control_socket
+        original_identify = control_socket.identify_gateway
+        control_socket.identify_gateway = counting_identify  # type: ignore[method-assign]
+        hr.read_record = lambda role, **kw: record  # type: ignore[method-assign]
+        hr.record_names_live_owner = lambda rec: rec is record  # type: ignore[method-assign]
+        host_attach.invalidate_host_gateway_cache()
+
+        def once() -> None:
+            host_attach.invalidate_host_gateway_cache()
+            for name in names:
+                path = home if name == "default" else home / "profiles" / name
+                profiles_mod._check_gateway_running(path)
+                if name != "default":
+                    profiles_mod._served_by_running_multiplexer(name)
+
+        stats = _time_loop(once, repeats)
+        stats["profiles"] = float(profiles)
+        stats["identify_calls"] = float(identifies["n"])
+        stats["identify_per_scan"] = float(identifies["n"]) / repeats if repeats else 0.0
+        return stats
+    finally:
+        hr.read_record = original_read  # type: ignore[method-assign]
+        hr.record_names_live_owner = original_live  # type: ignore[method-assign]
+        if original_identify is not None:
+            from gateway import control_socket
+            control_socket.identify_gateway = original_identify  # type: ignore[method-assign]
+        host_attach.invalidate_host_gateway_cache()
+        _restore_hermes_home(previous)
+
+
+def readpool_pressure(*, files: int = 43, checkouts: int = 4, repeats: int = 6) -> dict[str, float]:
+    """Heartbeat / bindings shape: many state.db files each borrow a read conn.
+
+    Production's process permit ceiling was three profiles' worth (24). A
+    43-profile multiplex sits on that ceiling and reclaims on every acquire.
+    """
+    from hermes_state import SessionDB
+    import hermes_state_readpool as readpool
+
+    home, previous = _temp_hermes_home()
+    listings = {"n": 0}
+    real_open = readpool._open_fd_count
+    real_reclaim = readpool._reclaim_idle_read_conn_anywhere
+
+    def counting_open():
+        listings["n"] += 1
+        return real_open()
+
+    reclaims = {"n": 0}
+
+    def counting_reclaim():
+        reclaims["n"] += 1
+        return real_reclaim()
+
+    dbs: list[Any] = []
+    try:
+        for i in range(files):
+            db = SessionDB(db_path=home / f"p{i:02d}" / "state.db")
+            db.create_session(session_id="s1", source="cli", model="m")
+            dbs.append(db)
+        readpool._open_fd_count = counting_open  # type: ignore[method-assign]
+        readpool._reclaim_idle_read_conn_anywhere = counting_reclaim  # type: ignore[method-assign]
+        readpool._fd_usage_cache = (0.0, None)
+
+        def once() -> None:
+            readpool._fd_usage_cache = (0.0, None)
+            borrowed: list[tuple[Any, Any]] = []
+            for db in dbs:
+                for _ in range(checkouts):
+                    conn = db._checkout_read_conn()
+                    if conn is not None:
+                        borrowed.append((db, conn))
+            for db, conn in borrowed:
+                try:
+                    db._read_pool.put_nowait(conn)
+                except queue.Full:
+                    db._close_read_conn(conn)
+
+        stats = _time_loop(once, repeats)
+        stats["files"] = float(files)
+        stats["fd_listings"] = float(listings["n"])
+        stats["reclaims"] = float(reclaims["n"])
+        stats["process_max"] = float(readpool._READ_POOL_PROCESS_MAX)
+        return stats
+    finally:
+        readpool._open_fd_count = real_open  # type: ignore[method-assign]
+        readpool._reclaim_idle_read_conn_anywhere = real_reclaim  # type: ignore[method-assign]
+        for db in dbs:
+            db.close()
+        _restore_hermes_home(previous)
+
+
+def hosted_bindings_empty(*, services: int = 43, repeats: int = 12) -> dict[str, float]:
+    """43 hosted-room supervisors polling ``bindings()`` when the profile owns
+    no rooms — the production 44-thread poller tax."""
+    from types import SimpleNamespace
+
+    from gateway.session_hosted_service import CanonicalHostedRoomService
+    from hermes_state import SessionDB
+    from gateway import hosted_rooms
+    from hermes_state_runtime import begin_runtime_epoch
+
+    home, previous = _temp_hermes_home()
+    lists = {"n": 0}
+    real_list = hosted_rooms.list_rooms
+
+    def counting_list(*args: Any, **kwargs: Any):
+        lists["n"] += 1
+        return real_list(*args, **kwargs)
+
+    dbs: list[Any] = []
+    try:
+        hosted_rooms.list_rooms = counting_list  # type: ignore[method-assign]
+        runtimes = []
+        for i in range(services):
+            db = SessionDB(home / f"p{i:02d}" / "state.db")
+            dbs.append(db)
+            authority = SimpleNamespace(
+                db=db, profile_id=str(home / f"p{i:02d}"),
+                epoch=begin_runtime_epoch(db, instance_id=f"bench-{i}"),
+            )
+            runtimes.append(CanonicalHostedRoomService(authority, None))
+
+        def once() -> None:
+            for service in runtimes:
+                assert service.bindings() == ()
+
+        stats = _time_loop(once, repeats)
+        stats["services"] = float(services)
+        stats["list_rooms_calls"] = float(lists["n"])
+        stats["list_rooms_per_scan"] = float(lists["n"]) / repeats if repeats else 0.0
+        return stats
+    finally:
+        hosted_rooms.list_rooms = real_list  # type: ignore[method-assign]
+        for db in dbs:
+            db.close()
+        _restore_hermes_home(previous)
+
+
 def kanban_tick(*, tasks: int = 30, ticks: int = 12) -> dict[str, float]:
     """One-board dispatch_once loop with ``tasks`` healthy running rows (no spawn)."""
     from hermes_cli import kanban_db as kb
@@ -314,4 +528,7 @@ def all_workloads() -> dict[str, dict[str, float]]:
         "json_dumps_compare": json_dumps_compare(),
         "redact_corpus": redact_corpus(),
         "kanban_tick": kanban_tick(),
+        "host_liveness_scan": host_liveness_scan(),
+        "readpool_pressure": readpool_pressure(),
+        "hosted_bindings_empty": hosted_bindings_empty(),
     }

@@ -17,8 +17,11 @@ from typing import Any
 from bench.gateway.workloads import (
     all_workloads,
     fanout_stream,
+    hosted_bindings_empty,
+    host_liveness_scan,
     json_dumps_compare,
     kanban_tick,
+    readpool_pressure,
     redact_corpus,
 )
 
@@ -27,6 +30,9 @@ _DRIVERS = {
     "json_dumps_compare": json_dumps_compare,
     "redact_corpus": redact_corpus,
     "kanban_tick": kanban_tick,
+    "host_liveness_scan": host_liveness_scan,
+    "readpool_pressure": readpool_pressure,
+    "hosted_bindings_empty": hosted_bindings_empty,
 }
 
 
