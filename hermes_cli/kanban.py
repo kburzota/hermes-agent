@@ -987,18 +987,21 @@ def _cmd_block(args: argparse.Namespace) -> int:
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
         def ok_msg(tid):
-            # Report where it landed: dependency blocks -> todo, tripped unblock-loop breaker -> triage.
+            # Report where it landed: dependency -> todo, loop-park -> blocked (or triage if opted out).
             landed = kb.get_task(conn, tid)
             where = landed.status if landed else "blocked"
+            looped = bool(landed and landed.block_recurrences >= kb.BLOCK_RECURRENCE_LIMIT)
             if where == "todo":
                 return f"{tid} → todo (dependency wait){suffix}"
-            if kind == "dependency" and where == "blocked":
+            if kind == "dependency" and where == "blocked" and not looped:
                 return f"Blocked {tid} as needs_input (no open parent to wait on){suffix}"
-            if where == "triage":
+            if where == "triage" or (where == "blocked" and looped):
                 # Only a typed owner-input block carries a question for a human.
                 verdict = ("needs a human decision" if (landed.block_kind if landed else kind) == "needs_input"
                            else "orchestration attention needed")
-                return f"{tid} → triage (unblock loop detected — {verdict}){suffix}"
+                if where == "triage":
+                    return f"{tid} → triage (unblock loop detected — {verdict}){suffix}"
+                return f"{tid} → blocked (unblock loop detected — parked until explicit unblock){suffix}"
             return f"Blocked {tid}{suffix}"
 
         op = _commented(conn, reason, author, "BLOCKED", lambda tid: kb.block_task(

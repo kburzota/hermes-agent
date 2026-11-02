@@ -337,7 +337,13 @@ def decompose_task(
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+    """Return task ids currently in the triage column.
+
+    Loop-escalated cards (``block_loop_detected``) are omitted so auto-decompose
+    cannot specify them back into the dispatch pool.
+    """
+    from hermes_cli.kanban_db_block_loop import filter_triage_ids
+
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+        return filter_triage_ids(conn, [row.id for row in rows])

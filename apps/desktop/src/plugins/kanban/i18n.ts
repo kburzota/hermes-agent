@@ -442,7 +442,7 @@ export const en: KanbanMessages = {
   notify: {
     completedTitle: 'Task completed',
     blockedTitle: 'Task blocked — needs your input',
-    blockLoopTitle: 'Task routed to triage — needs a decision',
+    blockLoopTitle: 'Task parked after repeated blocks — needs attention',
     gaveUpTitle: 'Task stopped',
     gaveUpBody: 'Hermes couldn’t finish this task. Open Kanban to see why and reassign it.',
     crashedTitle: 'Task hit a problem — Hermes will retry it automatically',

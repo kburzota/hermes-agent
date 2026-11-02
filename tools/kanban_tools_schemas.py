@@ -178,7 +178,8 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "no agent can do), or 'transient' (a flaky failure that may clear). "
         "``reason`` is shown to the human on the board. If a task keeps "
         "getting unblocked and re-blocked for the same reason, it is "
-        "auto-escalated to triage. Use for genuine blockers only — don't "
+        "parked (sticky blocked) so the dispatcher will not reclaim it "
+        "until an explicit unblock. Use for genuine blockers only — don't "
         "block on things you can resolve yourself."
     ),
     {

@@ -11,7 +11,8 @@ forever. The fix gives ``block_task`` a typed ``kind`` and a persistent
   and the block is recorded as ``needs_input`` (sticky, loop-counted).
 * ``needs_input`` / ``capability`` / un-typed blocks land in ``blocked``;
   each same-cause re-block after an unblock increments ``block_recurrences``,
-  and at ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
+  and at ``BLOCK_RECURRENCE_LIMIT`` the task is parked (sticky ``blocked``)
+  so the dispatcher will not reclaim it.
 * ``unblock_task`` deliberately does NOT reset ``block_recurrences`` (the
   amnesia that let the loop run unbounded).
 * A successful ``complete_task`` resets the loop memory.
@@ -84,6 +85,8 @@ def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
         payload = events[-1].payload or {}
         assert payload.get("recurrences") == 2
         assert payload.get("kind") == "capability"
+        assert payload.get("parked") == "blocked"
+        assert kb.get_task(conn, tid).status == "blocked"
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +123,7 @@ def test_dependency_block_with_terminal_parents_parks_then_escalates(
     satisfied by ``recompute_ready``: it must park in ``blocked`` as
     ``needs_input`` (no ``dependency_wait``, no re-promotion), say so on the
     CLI, and count toward the loop breaker so a re-block after an unblock
-    reaches ``triage``."""
+    parks until an explicit unblock."""
     with kbc.connect_closing() as conn:
         parent = kb.create_task(conn, title="already-done-parent", assignee="worker")
         with kb.write_txn(conn):
@@ -145,9 +148,11 @@ def test_dependency_block_with_terminal_parents_parks_then_escalates(
         assert kb.unblock_task(conn, child)
         assert kb.claim_task(conn, child, claimer="worker") is not None
         assert kb.block_task(conn, child, reason="still waiting", kind="dependency")
-        assert kb.get_task(conn, child).status == "triage"
+        parked_loop = kb.get_task(conn, child)
+        assert parked_loop.status == "blocked"
         loop = [e for e in kb.list_events(conn, child) if e.kind == "block_loop_detected"][-1].payload
         assert loop["recurrences"] == kb.BLOCK_RECURRENCE_LIMIT
+        assert loop.get("parked") == "blocked"
 
 
 def test_dependency_block_with_open_parent_stays_parked_across_dispatch_tick(
@@ -201,7 +206,7 @@ def test_dependency_block_with_open_parent_stays_parked_across_dispatch_tick(
 def test_transient_block_event_carries_kind(kanban_home: Path) -> None:
     """Desktop completion-notify filters transient blocked events on payload.kind.
 
-    ``_route_block`` already writes ``kind`` onto the ``blocked`` event; this
+    ``route_block`` already writes ``kind`` onto the ``blocked`` event; this
     locks that contract so a later payload trim cannot silently re-toast
     routine slot/backoff waits.
     """

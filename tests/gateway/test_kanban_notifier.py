@@ -649,15 +649,15 @@ def _fmt_block_loop(payload):
 
 
 def test_block_loop_technical_kind_uses_neutral_orchestration_wording():
-    """A repeated technical block (transient/capability/untyped) routed to
-    triage is an orchestration handoff with no question for the owner, so the
-    ping must not claim a human decision (#111125)."""
+    """A repeated technical block (transient/capability/untyped) parked by
+    the loop breaker is an orchestration handoff with no question for the
+    owner, so the ping must not claim a human decision (#111125)."""
     payload = {"reason": "waiting on upstream", "kind": "transient", "recurrences": 2}
     msg = _fmt_block_loop(payload)
     assert "for orchestration attention" in msg
     assert "human decision" not in msg
     # Circuit-breaker visibility is preserved.
-    assert "TRIAGE" in msg
+    assert "parked after repeated blocks" in msg
     assert "waiting on upstream" in msg
 
 
@@ -679,7 +679,7 @@ def test_block_loop_owner_input_keeps_decision_wording():
 # ---------------------------------------------------------------------------
 # Handoffs that hand a decision back to the origin must wake it, not only ping
 # it: `review_requested` (implementation done, waiting for a reviewer) and
-# `block_loop_detected` (routed to triage) are terminal kinds just like
+# `block_loop_detected` (parked after repeated blocks) are terminal kinds just like
 # `blocked`.
 # ---------------------------------------------------------------------------
 

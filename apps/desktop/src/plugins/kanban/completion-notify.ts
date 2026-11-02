@@ -9,7 +9,7 @@
  * (gateway/kanban_watchers.py): 'completed' (kanban_db.complete_task —
  * payload: summary + artifacts), 'blocked' (payload: reason + kind), 'gave_up'
  * (payload: error), 'crashed', 'timed_out', and 'block_loop_detected'
- * (payload: reason — the routed-to-triage orchestration handoff).
+ * (payload: reason — parked after repeated same-cause blocks).
  * A 'blocked' event whose payload.kind is 'transient' is silent (routine
  * wait for a free test slot / backoff) but still advances the cursor.
  *
@@ -60,7 +60,7 @@ const TERMINAL_NOTIFY = new Map<string, { titleKey: string; toast: ToastKind }>(
 const TOAST_DURATION_MS = 8000
 
 /** Routine wait (free slot / backoff) — not a user-actionable blocker.
- *  `kanban_db._route_block` already writes payload.kind; older backends
+ *  `route_block` already writes payload.kind; older backends
  *  omit it and still notify. */
 function isTransientBlock(kind: string, ev: CompletionEvent): boolean {
   return kind === 'blocked' && ev.payload?.kind === 'transient'
