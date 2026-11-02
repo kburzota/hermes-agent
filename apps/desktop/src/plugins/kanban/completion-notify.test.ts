@@ -40,6 +40,7 @@ type NotifyInput = {
   title?: string
   kind?: string
   detail?: string
+  durationMs?: number
   action?: { label: string; onClick: () => void }
 }
 
@@ -411,6 +412,66 @@ describe('terminal kinds beyond completed', () => {
       message: 'needs API key',
       detail: 't101'
     })
+  })
+
+  it('kanban toasts auto-dismiss after 8 seconds for every terminal kind', async () => {
+    const m = await loadModule()
+    m.bindCompletionNotify(makeRest(() => 100) as never)
+
+    await m.onKanbanEventsFrame('smoke', [
+      ev(101, 'completed', { summary: 'Done' }),
+      ev(102, 'blocked', { reason: 'needs input', kind: 'needs_input' }),
+      ev(103, 'crashed')
+    ])
+
+    expect(hostMock.notify).toHaveBeenCalledTimes(3)
+
+    for (const [input] of hostMock.notify.mock.calls) {
+      expect(input).toMatchObject({ durationMs: 8000 })
+    }
+  })
+
+  it('needs_input blocked still notifies', async () => {
+    const os = { notify: vi.fn() }
+    const m = await loadModule()
+    m.bindCompletionNotify(makeRest(() => 100) as never, undefined, os)
+
+    const fired = await m.onKanbanEventsFrame('smoke', [
+      ev(101, 'blocked', { reason: 'Which API key?', kind: 'needs_input' })
+    ])
+
+    expect(fired).toBe(true)
+    expect(lastNotify()).toMatchObject({
+      kind: 'warning',
+      message: 'Which API key?',
+      durationMs: 8000
+    })
+    expect(os.notify).toHaveBeenCalledTimes(1)
+  })
+
+  it('transient blocked is silent but still advances the cursor', async () => {
+    const os = { notify: vi.fn() }
+    const m = await loadModule()
+    m.bindCompletionNotify(makeRest(() => 100) as never, undefined, os)
+
+    const fired = await m.onKanbanEventsFrame('smoke', [
+      ev(101, 'blocked', { reason: 'waiting for a free test slot', kind: 'transient' })
+    ])
+
+    expect(fired).toBe(false)
+    expect(hostMock.notify).not.toHaveBeenCalled()
+    expect(os.notify).not.toHaveBeenCalled()
+
+    // Cursor moved past 101: a later needs_input block still fires.
+    const later = await m.onKanbanEventsFrame('smoke', [
+      ev(101, 'blocked', { reason: 'replay', kind: 'needs_input' }),
+      ev(102, 'blocked', { reason: 'Which API key?', kind: 'needs_input' })
+    ])
+
+    expect(later).toBe(true)
+    expect(hostMock.notify).toHaveBeenCalledTimes(1)
+    expect(lastNotify().message).toBe('Which API key?')
+    expect(os.notify).toHaveBeenCalledTimes(1)
   })
 
   it('block_loop_detected notifies that a decision is needed', async () => {

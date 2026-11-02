@@ -198,3 +198,20 @@ def test_dependency_block_with_open_parent_stays_parked_across_dispatch_tick(
 # ---------------------------------------------------------------------------
 
 
+def test_transient_block_event_carries_kind(kanban_home: Path) -> None:
+    """Desktop completion-notify filters transient blocked events on payload.kind.
+
+    ``_route_block`` already writes ``kind`` onto the ``blocked`` event; this
+    locks that contract so a later payload trim cannot silently re-toast
+    routine slot/backoff waits.
+    """
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        assert kb.block_task(conn, tid, reason="waiting for a free test slot", kind="transient")
+        parked = kb.get_task(conn, tid)
+        assert (parked.status, parked.block_kind) == ("blocked", "transient")
+        blocked = [e for e in kb.list_events(conn, tid) if e.kind == "blocked"][-1].payload
+        assert blocked["kind"] == "transient"
+        assert blocked["reason"] == "waiting for a free test slot"
+
+

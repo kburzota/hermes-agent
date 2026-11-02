@@ -7,9 +7,11 @@
  * no DB, no auth, no persistence — cursor is an in-memory per-board high-water
  * mark. Notifies on the same terminal kinds the gateway watcher pings
  * (gateway/kanban_watchers.py): 'completed' (kanban_db.complete_task —
- * payload: summary + artifacts), 'blocked' (payload: reason), 'gave_up'
+ * payload: summary + artifacts), 'blocked' (payload: reason + kind), 'gave_up'
  * (payload: error), 'crashed', 'timed_out', and 'block_loop_detected'
  * (payload: reason — the routed-to-triage orchestration handoff).
+ * A 'blocked' event whose payload.kind is 'transient' is silent (routine
+ * wait for a free test slot / backoff) but still advances the cursor.
  *
  * Two delivery doors, complementary by design:
  *  - `host.notify` — the in-app toast, covers the foreground case;
@@ -53,6 +55,16 @@ const TERMINAL_NOTIFY = new Map<string, { titleKey: string; toast: ToastKind }>(
   ['gave_up', { titleKey: 'notify.gaveUpTitle', toast: 'error' }],
   ['timed_out', { titleKey: 'notify.timedOutTitle', toast: 'warning' }]
 ])
+
+/** Kanban terminal toasts auto-dismiss; other warning/error toasts stay sticky. */
+const TOAST_DURATION_MS = 8000
+
+/** Routine wait (free slot / backoff) — not a user-actionable blocker.
+ *  `kanban_db._route_block` already writes payload.kind; older backends
+ *  omit it and still notify. */
+function isTransientBlock(kind: string, ev: CompletionEvent): boolean {
+  return kind === 'blocked' && ev.payload?.kind === 'transient'
+}
 
 const seenEventIdByBoard = new Map<string, number>()
 const baselinePending = new Set<string>()
@@ -168,6 +180,7 @@ function notifyOne(kind: string, spec: { titleKey: string; toast: ToastKind }, e
     title,
     message,
     ...(detail ? { detail } : {}),
+    durationMs: TOAST_DURATION_MS,
     action: { label: t('notify.openKanban'), onClick: () => host.navigate('/kanban') }
   })
 
@@ -208,7 +221,7 @@ export async function onKanbanEventsFrame(slug: string, events?: CompletionEvent
     seenEventIdByBoard.set(slug, cursor)
     const spec = TERMINAL_NOTIFY.get(ev.kind ?? '')
 
-    if (spec) {
+    if (spec && !isTransientBlock(ev.kind ?? '', ev)) {
       try {
         notifyOne(ev.kind!, spec, ev)
         fired = true
