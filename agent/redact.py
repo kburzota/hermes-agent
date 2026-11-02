@@ -513,6 +513,7 @@ _AUTH_HEADER_RE = re.compile(r"((?:Proxy-)?Authorization:\s*)([A-Za-z][\w.+-]*\s
 # values would otherwise leak when a curl command is echoed into tool output.
 SECRET_HEADER_NAME_LIST = ("x-api-key", "x-goog-api-key", "api-key", "apikey", "x-api-token", "x-auth-token", "x-access-token")
 _SECRET_HEADER_NAMES = rf"(?:{'|'.join(SECRET_HEADER_NAME_LIST)})"
+_SECRET_HEADER_HINT_RE = re.compile(_SECRET_HEADER_NAMES, re.IGNORECASE)
 _SECRET_HEADER_RE = re.compile(rf"({_SECRET_HEADER_NAMES}\s*:\s*)(\S+)", re.IGNORECASE)
 
 # Telegram bot tokens: [bot]<digits>:<token>, token >= 30 chars. The lookbehind
@@ -521,6 +522,7 @@ _SECRET_HEADER_RE = re.compile(rf"({_SECRET_HEADER_NAMES}\s*:\s*)(\S+)", re.IGNO
 # diff, hex/decimal dumps) retried the greedy ``\d{8,}`` from every digit —
 # quadratic, one core at 100% for hours while holding the GIL.
 _TELEGRAM_RE = re.compile(r"(?<!\d)(bot)?(\d{8,}):([-A-Za-z0-9_]{30,})")
+_TELEGRAM_HINT_RE = re.compile(r"\d{8}:")
 
 _PRIVATE_KEY_RE = re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----")
 
@@ -604,6 +606,9 @@ _PREFIX_RE = _compile_prefix_matcher(_PREFIX_PATTERNS)
 _ZHIPU_API_KEY_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])([0-9a-f]{32}\.[A-Za-z0-9]{16,})(?![A-Za-z0-9_.-])"
 )
+# 32 hex + '.' + 16 body chars. The hint is the expensive lookbehind's prefix.
+_ZHIPU_MIN_LEN = 49
+_ZHIPU_HINT_RE = re.compile(r"[0-9a-f]{32}\.")
 
 
 def _mask_control_split_tokens(text: str, mask_fn) -> str:
@@ -957,7 +962,7 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
         text = _mask_control_split_tokens(text, _prefix_sub)
         text = _PREFIX_RE.sub(lambda m: _prefix_sub(m.group(1)), text)
 
-    if "." in text:
+    if len(text) >= _ZHIPU_MIN_LEN and "." in text and _ZHIPU_HINT_RE.search(text):
         _zhipu_sub = _mask_token_nonreusable if file_read else _mask_token
         text = _ZHIPU_API_KEY_RE.sub(lambda m: _zhipu_sub(m.group(1)), text)
 
@@ -968,8 +973,10 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
         text = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + (m.group(2) or "") + _mask_token(m.group(3)), text)
 
     if ":" in text:
-        text = _SECRET_HEADER_RE.sub(lambda m: m.group(1) + _mask_token(m.group(2)), text)
-        text = _TELEGRAM_RE.sub(lambda m: f"{m.group(1) or ''}{m.group(2)}:***", text)
+        if _SECRET_HEADER_HINT_RE.search(text):
+            text = _SECRET_HEADER_RE.sub(lambda m: m.group(1) + _mask_token(m.group(2)), text)
+        if _TELEGRAM_HINT_RE.search(text):
+            text = _TELEGRAM_RE.sub(lambda m: f"{m.group(1) or ''}{m.group(2)}:***", text)
 
     if "BEGIN" in text and "-----" in text:
         text = _PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", text)
@@ -1276,9 +1283,21 @@ def _has_nested_unbounded_repeat(pattern: str) -> bool:
 _PREFIX_SUBSTRINGS = tuple(_extract_literal_prefix(p) for p in _PREFIX_PATTERNS)
 
 
+def _compile_prefix_substring_re(substrings: tuple[str, ...]) -> re.Pattern[str] | None:
+    """One-pass search for any literal prefix; empty prefixes are ignored (they
+    would match every string and force the expensive ``_PREFIX_RE``)."""
+    parts = [re.escape(p) for p in substrings if p]
+    if not parts:
+        return None
+    return re.compile("|".join(parts))
+
+
+_PREFIX_SUBSTRING_RE = _compile_prefix_substring_re(_PREFIX_SUBSTRINGS)
+
+
 def _has_known_prefix_substring(text: str) -> bool:
     """Cheap pre-check before the expensive ``_PREFIX_RE``."""
-    return any(p in text for p in _PREFIX_SUBSTRINGS)
+    return _PREFIX_SUBSTRING_RE is not None and _PREFIX_SUBSTRING_RE.search(text) is not None
 
 
 # --- Plugin-registered redaction patterns -----------------------------------
@@ -1299,10 +1318,11 @@ def _plugin_patterns() -> list:
 def _rebuild_prefix_matcher() -> None:
     """Recompile the prefix alternation and pre-screen substrings; callers read the
     module globals at call time, so the swap propagates immediately."""
-    global _PREFIX_RE, _PREFIX_SUBSTRINGS
+    global _PREFIX_RE, _PREFIX_SUBSTRINGS, _PREFIX_SUBSTRING_RE
     combined = _PREFIX_PATTERNS + _plugin_patterns()
     _PREFIX_RE = _compile_prefix_matcher(combined)
     _PREFIX_SUBSTRINGS = tuple(_extract_literal_prefix(p) for p in combined)
+    _PREFIX_SUBSTRING_RE = _compile_prefix_substring_re(_PREFIX_SUBSTRINGS)
 
 
 # Structural validators for register_redaction_patterns, in check order:
