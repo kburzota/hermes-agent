@@ -115,6 +115,23 @@ async def test_service_does_not_plan_or_run_historical_unowned_rooms(tmp_path, m
         assert [b.room_id for b in service.bindings()] == ['owned']
 
 
+def test_bindings_skip_list_rooms_when_the_profile_owns_none(tmp_path, monkeypatch):
+    """One supervisor per served profile: empty owned must not open shared-state.db."""
+    from gateway import hosted_rooms
+    from gateway.session_hosted_service import CanonicalHostedRoomService
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    with SessionDB(tmp_path / 'state.db') as db:
+        authority = SimpleNamespace(db=db, profile_id=str(tmp_path), epoch=begin_runtime_epoch(db, instance_id='test'))
+        service = CanonicalHostedRoomService(authority, None)
+
+        def forbidden(*_a, **_k):
+            raise AssertionError('list_rooms must not run when this profile owns no rooms')
+
+        monkeypatch.setattr(hosted_rooms, 'list_rooms', forbidden)
+        assert service.bindings() == ()
+
+
 
 @pytest.mark.parametrize('driver', [False, True])
 def test_rejected_create_never_leaves_owner_only_reservation(tmp_path, monkeypatch, driver):
