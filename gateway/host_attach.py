@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -140,6 +141,28 @@ def _identify(home: Path) -> Optional[dict]:
         return None
 
 
+def _identify_self() -> Optional[dict]:
+    """This process's ``identify`` payload, without dialing our own control socket.
+
+    Production ``list_profiles`` / dashboard polls asked ``host_gateway()`` once
+    per profile. A cache miss then connected to *this* process's unix socket,
+    contended for the GIL, and often timed out — after which every profile
+    re-dialed. ``build_identify_payload`` is the same primitive the socket
+    handler uses; the live runner overlays the in-memory descriptor on the
+    socket path only. Runtime-status ``served_profiles`` is what that overlay
+    stamps, so a self-read of the status file is the same answer within the
+    existing 2s memo window.
+    """
+    try:
+        from gateway.control_socket import build_identify_payload
+
+        payload = build_identify_payload()
+    except Exception:
+        logger.debug("local host gateway identify failed", exc_info=True)
+        return None
+    return payload if isinstance(payload, dict) and payload.get("pid") == os.getpid() else None
+
+
 def _served_from_identity(identity: dict) -> tuple[str, ...]:
     """Served set from a live ``identify``. A STANDALONE gateway publishes no ``served_profiles``;
     it serves its own profile and nothing else, which is not the same as "unknown".
@@ -184,12 +207,14 @@ def _identity_matches(identity, record, home: Path) -> bool:
 #: memo is time-bounded rather than permanent. Writes invalidate it eagerly.
 HOST_GATEWAY_CACHE_TTL_S = 2.0
 _cached_probe: Optional[tuple[float, Optional[HostGateway]]] = None
+_probe_lock = threading.Lock()
 
 
 def invalidate_host_gateway_cache() -> None:
     """Forget the memoized probe (called by ``host_rendezvous`` on every record write)."""
     global _cached_probe
-    _cached_probe = None
+    with _probe_lock:
+        _cached_probe = None
 
 
 def _probe_host_gateway(wait_for_channel: float) -> Optional[HostGateway]:
@@ -205,6 +230,14 @@ def _probe_host_gateway(wait_for_channel: float) -> Optional[HostGateway]:
     if not hr.record_names_live_owner(record):
         return None
     home = record_home(record)
+    # This process *is* the recorded owner: do not connect to our own control
+    # socket. Dashboard polls of 40+ profiles were spending ~17% of GIL samples
+    # in that self-dial, and a timeout made served_known=False so every profile
+    # retried.
+    if record.pid == os.getpid():
+        identity = _identify_self()
+        if _identity_matches(identity, record, home):
+            return HostGateway(record.pid, home, _served_from_identity(identity))
     deadline = time.monotonic() + max(0.0, wait_for_channel)
     while True:
         identity = _identify(home)
@@ -227,9 +260,13 @@ def host_gateway(*, wait_for_channel: float = 0.0) -> Optional[HostGateway]:
     now = time.monotonic()
     if wait_for_channel <= 0 and _cached_probe is not None and now - _cached_probe[0] < HOST_GATEWAY_CACHE_TTL_S:
         return _cached_probe[1]
-    result = _probe_host_gateway(wait_for_channel)
-    _cached_probe = (time.monotonic(), result)
-    return result
+    with _probe_lock:
+        now = time.monotonic()
+        if wait_for_channel <= 0 and _cached_probe is not None and now - _cached_probe[0] < HOST_GATEWAY_CACHE_TTL_S:
+            return _cached_probe[1]
+        result = _probe_host_gateway(wait_for_channel)
+        _cached_probe = (time.monotonic(), result)
+        return result
 
 
 def host_gateway_serving(profile: str, *, wait_for_channel: float = 0.0) -> Optional[HostGateway]:
