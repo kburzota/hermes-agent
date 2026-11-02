@@ -425,10 +425,13 @@ blocked → unblocked → re-blocked for the same cause `BLOCK_RECURRENCE_LIMIT`
 times (default `2`), the unblock-loop breaker parks it so the dispatcher will
 not reclaim it until an explicit unblock. Auto-decompose will not treat that
 card as a new idea — routing to `triage` used to, and the decomposer would
-specify it back to `ready`. When the block reason names exactly one other
-installed profile, `kanban.block_loop_unblock_card` (default true) mints one
+specify it back to `ready`. When the block reason explicitly mentions exactly one other
+installed profile (`@name`, `profile name` / `assignee name`, or
+`assigned to name`), `kanban.block_loop_unblock_card` (default true) mints one
 support card assigned to that profile, linked as a *parent* of the parked
-card so it is not gated behind the work it exists to unblock. This is a
+card so it is not gated behind the work it exists to unblock. Bare words
+never match, so a profile named `test` is not taken from "waiting for a
+test slot". This is a
 deterministic DB guard, not an LLM judgment call, and a task's body text
 cannot opt out of it: the recurrence counter deliberately survives each
 unblock (it resets only on a successful `complete`). To keep an unblocked
@@ -833,7 +836,7 @@ Config knobs (all under `kanban:` in `~/.hermes/config.yaml`):
 | Key | Default | Purpose |
 |---|---|---|
 | `park_block_loop` | `true` | When the unblock-loop breaker fires, park the card as sticky `blocked` so the dispatcher will not reclaim it until an explicit unblock. `false` restores the old `triage` landing; auto-decompose still skips loop-escalated triage cards. |
-| `block_loop_unblock_card` | `true` | When a loop-parked card's block reason names exactly one other installed profile, create one support card assigned to that profile (idempotent; linked as a parent of the parked card). |
+| `block_loop_unblock_card` | `true` | When a loop-parked card's block reason explicitly mentions exactly one other installed profile (`@name`, `profile`/`assignee`/`assigned to`), create one support card assigned to that profile (idempotent; linked as a parent of the parked card). |
 | `auto_decompose` | `true` | Dispatcher auto-runs the built-in decomposer for Triage tasks every tick. It does not gate profile-driven `kanban_create` calls or creator wake turns. |
 | `auto_decompose_per_tick` | `3` | Cap on decompositions per dispatcher tick. Excess defers to the next tick. |
 | `orchestrator_profile` | `""` | Profile assigned to the root/orchestration task after decomposition. Empty = the root task keeps its own assignee, else the active default profile. |

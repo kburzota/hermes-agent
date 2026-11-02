@@ -246,7 +246,7 @@ gateway:
       reviewer_suffix: " — átnéző: @{reviewer}"
       implementer_suffix: " → megvalósító: @{implementer}"
       changes_requested: "🛑 {board_tag}Kanban {task_id} átnézése módosítást kért/BLOKK: {reason}{provenance}"
-      triage: "🛑 {head} TRIAGE-ba került — {why}{recurrences}{reason}"
+      triage: "🛑 {head} ismételt blokkolások után parkolva — {why}{recurrences}{reason}"
       triage_decision: "emberi döntés kell"
       triage_attention: "orkesztrációs figyelmet igényel"
       triage_recurrences: " ({value}x blokkolva ugyanazon ok miatt)"

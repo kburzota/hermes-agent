@@ -243,7 +243,7 @@ gateway:
       reviewer_suffix: " — レビュアー @{reviewer}"
       implementer_suffix: " → 実装者 @{implementer}"
       changes_requested: "🛑 {board_tag}Kanban {task_id} のレビューで変更要求/BLOCK: {reason}{provenance}"
-      triage: "🛑 {head} を TRIAGE に回しました — {why}{recurrences}{reason}"
+      triage: "🛑 {head} を繰り返しブロック後にパークしました — {why}{recurrences}{reason}"
       triage_decision: "人の判断が必要です"
       triage_attention: "オーケストレーションの確認が必要です"
       triage_recurrences: " (同じ原因で {value} 回ブロック)"

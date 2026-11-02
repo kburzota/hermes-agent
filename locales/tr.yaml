@@ -243,7 +243,7 @@ gateway:
       reviewer_suffix: " — inceleyici @{reviewer}"
       implementer_suffix: " → uygulayıcı @{implementer}"
       changes_requested: "🛑 {board_tag}Kanban {task_id} incelemesi değişiklik istedi/BLOK: {reason}{provenance}"
-      triage: "🛑 {head} TRIAGE'a yönlendirildi — {why}{recurrences}{reason}"
+      triage: "🛑 {head} tekrarlanan bloklardan sonra park edildi — {why}{recurrences}{reason}"
       triage_decision: "insan kararı gerekiyor"
       triage_attention: "orkestrasyon dikkati gerekiyor"
       triage_recurrences: " (aynı nedenle {value} kez engellendi)"

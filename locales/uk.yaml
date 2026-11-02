@@ -243,7 +243,7 @@ gateway:
       reviewer_suffix: " — рев'юер @{reviewer}"
       implementer_suffix: " → виконавець @{implementer}"
       changes_requested: "🛑 {board_tag}Kanban {task_id}: рев'ю вимагає змін/BLOCK: {reason}{provenance}"
-      triage: "🛑 {head} передано в TRIAGE — {why}{recurrences}{reason}"
+      triage: "🛑 {head} припарковано після повторних блоків — {why}{recurrences}{reason}"
       triage_decision: "потрібне рішення людини"
       triage_attention: "потребує уваги оркестрації"
       triage_recurrences: " (заблоковано {value}x з тієї ж причини)"

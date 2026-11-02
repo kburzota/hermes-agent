@@ -69,20 +69,36 @@ def test_park_block_loop_defaults_are_on() -> None:
     assert kanban.get("block_loop_unblock_card") is True
 
 
-def test_named_unblock_assignee_single_hit() -> None:
+def test_named_unblock_assignee_requires_explicit_mention() -> None:
+    known = ["pr-agent", "alice", "test"]
     assert loop.named_unblock_assignee(
-        "Need pr-agent to rebase PR #9",
-        known_profiles=["pr-agent", "alice"],
-        exclude="worker",
+        "Need @pr-agent to rebase PR #9", known_profiles=known, exclude="worker",
     ) == "pr-agent"
+    assert loop.named_unblock_assignee(
+        "profile pr-agent should rebase", known_profiles=known,
+    ) == "pr-agent"
+    assert loop.named_unblock_assignee(
+        "assignee: alice must approve", known_profiles=known,
+    ) == "alice"
+    assert loop.named_unblock_assignee(
+        "assigned to alice before deploy", known_profiles=known,
+    ) == "alice"
+    # Bare words — including a profile named ``test`` in a slot wait — mint nothing.
+    assert loop.named_unblock_assignee(
+        "Need pr-agent to rebase PR #9", known_profiles=known,
+    ) is None
+    assert loop.named_unblock_assignee(
+        "waiting for a test slot", known_profiles=known,
+    ) is None
+    assert loop.named_unblock_assignee("foo@alice.com", known_profiles=known) is None
 
 
 def test_named_unblock_assignee_ambiguous_or_self() -> None:
     known = ["alice", "bob", "worker", "default"]
-    assert loop.named_unblock_assignee("alice and bob must both act", known_profiles=known) is None
-    assert loop.named_unblock_assignee("worker is stuck", known_profiles=known, exclude="worker") is None
+    assert loop.named_unblock_assignee("@alice and @bob must both act", known_profiles=known) is None
+    assert loop.named_unblock_assignee("@worker is stuck", known_profiles=known, exclude="worker") is None
     assert loop.named_unblock_assignee("use the default profile", known_profiles=known) is None
-    assert loop.named_unblock_assignee("Need alice-ops", known_profiles=["alice"]) is None
+    assert loop.named_unblock_assignee("Need @alice-ops", known_profiles=["alice"]) is None
 
 
 def test_loop_parks_sticky_blocked_and_dispatch_does_not_reclaim(
@@ -150,7 +166,7 @@ def test_transient_and_single_block_are_unchanged(kanban_home: Path) -> None:
 def test_named_agent_unblock_card_is_idempotent(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(loop, "_known_profile_names", lambda: {"pr-agent", "alice"})
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name == "pr-agent")
-    reason = "Need pr-agent to rebase PR #9 before deploy"
+    reason = "Need @pr-agent to rebase PR #9 before deploy"
 
     with kbc.connect() as conn:
         tid = _running_task(conn)
@@ -182,6 +198,57 @@ def test_named_agent_unblock_card_is_idempotent(kanban_home: Path, monkeypatch: 
         assert len(_park_comments(conn, tid)) == 1
 
 
+def test_completing_support_card_leaves_parked_card_blocked(
+    kanban_home: Path, all_assignees_spawnable, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The support card finishing does not ready the parked card; only unblock does."""
+    monkeypatch.setattr(loop, "_known_profile_names", lambda: {"pr-agent"})
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name == "pr-agent")
+    spawns: list[str] = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawns.append(task.id)
+        return 4242
+
+    with kbc.connect() as conn:
+        tid = _running_task(conn)
+        parked = _drive_to_loop(conn, tid, reason="Need @pr-agent to rebase PR #9")
+        assert parked.status == "blocked"
+        key = f"{loop._UNBLOCK_KEY_PREFIX}{tid}"
+        card_id = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived'",
+            (key,),
+        ).fetchone()["id"]
+        assert kb.get_task(conn, card_id).status in ("ready", "todo")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (card_id,))
+        assert kb.complete_task(conn, card_id, result="rebased")
+        still = kb.get_task(conn, tid)
+        assert still.status == "blocked"
+        assert kb.recompute_ready(conn) == 0
+        kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert tid not in spawns
+        assert kb.get_task(conn, tid).status == "blocked"
+        assert kb.unblock_task(conn, tid)
+        assert kb.get_task(conn, tid).status in ("ready", "todo")
+
+
+def test_common_word_profile_does_not_mint_unblock_card(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(loop, "_known_profile_names", lambda: {"test"})
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name == "test")
+    with kbc.connect() as conn:
+        tid = _running_task(conn)
+        _drive_to_loop(conn, tid, reason="waiting for a test slot", kind="transient")
+        rows = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ?",
+            (f"{loop._UNBLOCK_KEY_PREFIX}{tid}",),
+        ).fetchall()
+        assert rows == []
+        assert kb.parent_ids(conn, tid) == []
+
+
 def test_two_named_profiles_do_not_mint_unblock_card(
     kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -189,7 +256,7 @@ def test_two_named_profiles_do_not_mint_unblock_card(
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name in {"alice", "bob"})
     with kbc.connect() as conn:
         tid = _running_task(conn)
-        _drive_to_loop(conn, tid, reason="alice and bob must both rebase")
+        _drive_to_loop(conn, tid, reason="@alice and @bob must both rebase")
         kids = kb.child_ids(conn, tid)
         parents = kb.parent_ids(conn, tid)
         assert kids == []
@@ -225,7 +292,7 @@ def test_block_loop_unblock_card_false_skips_support_card(
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda name: name == "pr-agent")
     with kbc.connect() as conn:
         tid = _running_task(conn)
-        parked = _drive_to_loop(conn, tid, reason="Need pr-agent to rebase")
+        parked = _drive_to_loop(conn, tid, reason="Need @pr-agent to rebase")
         assert parked.status == "blocked"
         rows = conn.execute(
             "SELECT id FROM tasks WHERE idempotency_key = ?",

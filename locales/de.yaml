@@ -243,7 +243,7 @@ gateway:
       reviewer_suffix: " — Reviewer @{reviewer}"
       implementer_suffix: " → Umsetzer @{implementer}"
       changes_requested: "🛑 {board_tag}Kanban {task_id}: Review verlangt Änderungen/BLOCK: {reason}{provenance}"
-      triage: "🛑 {head} an TRIAGE weitergeleitet — {why}{recurrences}{reason}"
+      triage: "🛑 {head} nach wiederholten Blocks geparkt — {why}{recurrences}{reason}"
       triage_decision: "braucht eine menschliche Entscheidung"
       triage_attention: "zur Beachtung durch die Orchestrierung"
       triage_recurrences: " ({value}x aus derselben Ursache blockiert)"

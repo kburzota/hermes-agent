@@ -7,8 +7,9 @@ and the dispatcher reclaims it on the next tick. That is the production
 loop (a deploy card re-blocked ~once a minute while detection kept firing).
 
 Default policy: park as sticky ``blocked`` so only an explicit unblock
-returns it to the pool, comment why, and — when the reason names exactly
-one other installed profile — create one support card assigned to that
+returns it to the pool, comment why, and — when the reason explicitly
+mentions exactly one other installed profile (``@name``, ``profile``/
+``assignee``/``assigned to``) — create one support card assigned to that
 profile (idempotent; linked as a *parent* of the parked card so it is not
 gated behind the card it exists to unblock).
 """
@@ -23,6 +24,23 @@ logger = logging.getLogger(__name__)
 _UNBLOCK_AUTHOR = "block-loop"
 _UNBLOCK_KEY_PREFIX = "block-loop-unblock:"
 _PARK_COMMENT_PREFIX = "Parked after repeated same-cause blocks"
+
+# Profile names in a block reason must be mentioned explicitly. A bare word
+# match would mint a support card for a profile named ``test`` from
+# "waiting for a test slot".
+_PROFILE_TOKEN = r"[A-Za-z0-9][A-Za-z0-9_-]*"
+_AT_MENTION = re.compile(
+    rf"(?<![A-Za-z0-9._-])@({_PROFILE_TOKEN})(?![A-Za-z0-9._-])",
+    re.IGNORECASE,
+)
+_LABELED_MENTION = re.compile(
+    rf"(?<![A-Za-z0-9_-])(?:profile|assignee)\s*:?\s*({_PROFILE_TOKEN})(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
+_ASSIGNED_TO_MENTION = re.compile(
+    rf"(?<![A-Za-z0-9_-])assigned\s+to\s+({_PROFILE_TOKEN})(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
 
 
 def park_block_loop_enabled() -> bool:
@@ -66,26 +84,39 @@ def route_block(
 def named_unblock_assignee(
     reason: Optional[str], *, known_profiles: Iterable[str], exclude: Optional[str] = None,
 ) -> Optional[str]:
-    """The single installed profile named in *reason*, or None.
+    """The single installed profile *explicitly* named in *reason*, or None.
 
-    Skips the looping card's own assignee and the virtual ``default`` profile
-    (too common a word). Several named profiles → None rather than guess.
+    A hit is ``@name``, ``profile name`` / ``profile: name``, ``assignee name``
+    / ``assignee: name``, or ``assigned to name``. Bare words never match, so a
+    profile named ``test`` is not taken from "waiting for a test slot". Skips
+    the looping card's own assignee and the virtual ``default`` profile.
+    Several installed profiles → None rather than guess.
     """
     text = (reason or "").strip()
     if not text:
         return None
-    exclude_cf = (exclude or "").casefold()
+    skip = {(exclude or "").casefold(), "default"}
+    known = {n.casefold(): n for n in known_profiles if n and n.casefold() not in skip}
     hits: list[str] = []
-    for name in known_profiles:
-        if not name or name.casefold() in {exclude_cf, "default"}:
+    seen: set[str] = set()
+    for raw in _explicit_profile_mentions(text):
+        key = raw.casefold()
+        if key in seen:
             continue
-        if re.search(
-            rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])", text, re.IGNORECASE,
-        ):
-            hits.append(name)
+        seen.add(key)
+        if key in known:
+            hits.append(known[key])
     if len(hits) == 1:
         return hits[0]
     return None
+
+
+def _explicit_profile_mentions(text: str) -> list[str]:
+    """Token spans from ``@name`` / ``profile|assignee name`` / ``assigned to name``."""
+    found: list[str] = []
+    for pattern in (_AT_MENTION, _LABELED_MENTION, _ASSIGNED_TO_MENTION):
+        found.extend(m.group(1) for m in pattern.finditer(text))
+    return found
 
 
 def block_loop_task_ids(conn: Any, task_ids: list[str]) -> set[str]:

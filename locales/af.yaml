@@ -243,7 +243,7 @@ gateway:
       reviewer_suffix: " — nasiener @{reviewer}"
       implementer_suffix: " → implementeerder @{implementer}"
       changes_requested: "🛑 {board_tag}Kanban {task_id} nasien het veranderinge/BLOCK aangevra: {reason}{provenance}"
-      triage: "🛑 {head} na TRIAGE gestuur — {why}{recurrences}{reason}"
+      triage: "🛑 {head} geparkeer na herhaalde blokke — {why}{recurrences}{reason}"
       triage_decision: "benodig 'n menslike besluit"
       triage_attention: "vir orkestrasie-aandag"
       triage_recurrences: " ({value}x geblokkeer vir dieselfde oorsaak)"

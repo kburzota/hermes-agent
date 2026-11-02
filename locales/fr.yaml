@@ -269,7 +269,7 @@ gateway:
       reviewer_suffix: " — relecteur @{reviewer}"
       implementer_suffix: " → implémenteur @{implementer}"
       changes_requested: "🛑 {board_tag}Kanban {task_id} : la revue a demandé des modifications/BLOCK : {reason}{provenance}"
-      triage: "🛑 {head} envoyée en TRIAGE — {why}{recurrences}{reason}"
+      triage: "🛑 {head} mise en pause après des blocs répétés — {why}{recurrences}{reason}"
       triage_decision: "nécessite une décision humaine"
       triage_attention: "à l'attention de l'orchestration"
       triage_recurrences: " (bloquée {value} fois pour la même cause)"
