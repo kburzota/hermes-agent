@@ -241,12 +241,25 @@ class WSTransport:
 
     async def write_many_if_current_async(self, frames: list[dict], is_current: Callable[[], bool] | None) -> bool:
         """Recheck the batch's owner at each send without gating other producers' buffered tokens."""
+        return await self.write_many_lines_if_current_async(
+            [serialize_frame(frame, self._peer, _log) for frame in frames],
+            is_current,
+        )
+
+    async def write_many_lines_async(self, lines: list[str]) -> bool:
+        """``write_many_async`` for frames that are already serialized."""
+        return await self.write_many_lines_if_current_async(lines, None)
+
+    async def write_many_lines_if_current_async(
+        self, lines: list[str], is_current: Callable[[], bool] | None,
+    ) -> bool:
+        """Fanout drain path: send pre-serialized frames without dumping them again."""
         if self._closed:
             return False
         with self._token_lock:
             batch, self._pending_tokens = self._pending_tokens, []
             unguarded_prefix = len(batch)
-            batch.extend(serialize_frame(frame, self._peer, _log) for frame in frames)
+            batch.extend(lines)
         await self._safe_send_many(batch, is_current=is_current, unguarded_prefix=unguarded_prefix)
         return not self._closed
 

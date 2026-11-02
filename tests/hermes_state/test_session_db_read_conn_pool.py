@@ -741,6 +741,84 @@ def test_closed_handles_do_not_count_toward_duplicate_writer_warning(db, caplog)
         survivor.close()
 
 
+def test_fd_headroom_lists_once_within_the_cache_window(monkeypatch):
+    """A read burst must not listdir /dev/fd on every acquire."""
+    listings = []
+    monkeypatch.setattr(hermes_state_readpool, "_fd_soft_limit", lambda: 256)
+    monkeypatch.setattr(
+        hermes_state_readpool, "_open_fd_count", lambda: listings.append(1) or 10)
+    hermes_state_readpool._fd_usage_cache = (0.0, None)
+    assert hermes_state_readpool._fd_headroom_ok() is True
+    assert hermes_state_readpool._fd_headroom_ok() is True
+    assert listings == [1]
+
+
+def test_fd_headroom_refresh_is_single_flight(monkeypatch):
+    """Concurrent acquires share one listing instead of each walking /dev/fd."""
+    import threading
+
+    listings = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def listing():
+        listings.append(1)
+        started.set()
+        release.wait()
+        return 10
+
+    monkeypatch.setattr(hermes_state_readpool, "_fd_soft_limit", lambda: 256)
+    monkeypatch.setattr(hermes_state_readpool, "_open_fd_count", listing)
+    hermes_state_readpool._fd_usage_cache = (0.0, None)
+
+    results = []
+
+    def probe():
+        results.append(hermes_state_readpool._fd_headroom_ok())
+
+    first = threading.Thread(target=probe)
+    first.start()
+    assert started.wait(2.0)
+    second = threading.Thread(target=probe)
+    second.start()
+    release.set()
+    first.join(2.0)
+    second.join(2.0)
+    assert listings == [1]
+    assert results == [True, True]
+
+
+@pytest.mark.requires_wal
+def test_a_large_multiplex_holds_one_idle_read_per_profile_without_reclaim(tmp_path, monkeypatch):
+    """43 profiles each keeping one idle read must fit under the process ceiling."""
+    from hermes_state import SessionDB
+
+    reclaims = []
+    real = hermes_state_readpool._reclaim_idle_read_conn_anywhere
+
+    def counting():
+        reclaims.append(1)
+        return real()
+
+    monkeypatch.setattr(hermes_state_readpool, "_reclaim_idle_read_conn_anywhere", counting)
+    dbs = []
+    try:
+        for i in range(43):
+            d = SessionDB(db_path=tmp_path / f"p{i:02d}" / "state.db")
+            dbs.append(d)
+            conn = d._checkout_read_conn()
+            assert conn is not None, f"profile {i} degraded to the writer lock"
+            d._read_pool.put_nowait(conn)
+        assert reclaims == [], (
+            f"a 43-profile multiplex reclaimed {len(reclaims)} times while "
+            f"holding one idle read each; process ceiling is "
+            f"{hermes_state_readpool._READ_POOL_PROCESS_MAX}"
+        )
+    finally:
+        for d in dbs:
+            d.close()
+
+
 def test_failed_initialization_does_not_register_duplicate_writer_handle(db, monkeypatch):
     """A constructor that raises before opening must never join the handle budget."""
     budget = hermes_state_readpool._read_budget_for(db.db_path)

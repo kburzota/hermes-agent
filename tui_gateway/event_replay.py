@@ -57,9 +57,8 @@ def replay_epoch() -> str:
 
 def _freeze_params(params: dict) -> bytes:
     """Serialize one replay snapshot before the caller can mutate its object graph."""
-    return json.dumps(params, ensure_ascii=False, separators=(",", ":")).encode(
-        "utf-8", errors="surrogatepass"
-    )
+    from tui_gateway.json_codec import dumps_compact_bytes
+    return dumps_compact_bytes(params)
 
 
 def _thaw_params(payload: bytes, seq: int) -> dict:

@@ -798,11 +798,11 @@ def _check_gateway_running(profile_dir: Path) -> bool:
     the lock isn't held by *this* reader: dashboard as a separate s6 service, launch-service
     gateways with no live PID file); fallback validates the PID in ``gateway_state.json``
     against the process table, matching ``/api/status``."""
-    from gateway.status import get_running_pid, resolve_gateway_liveness
-    # cleanup_stale=False: a status probe for ANOTHER profile must never unlink its PID file.
+    from gateway.status import get_running_pid_cached, resolve_gateway_liveness
+    # cleanup_stale=False: never unlink another profile's PID file. Cached: Desktop polls this.
     return resolve_gateway_liveness(
         profile_dir=profile_dir, use_cache=False,
-        pid_probe=lambda path: get_running_pid(path, cleanup_stale=False)).running
+        pid_probe=lambda path: get_running_pid_cached(path, cleanup_stale=False)).running
 
 
 def _served_by_running_multiplexer(profile_name: str) -> bool:

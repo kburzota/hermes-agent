@@ -81,18 +81,20 @@ def _raise_unless_peer_gone(exc: Exception, what: str) -> None:
 
 
 def serialize_frame(obj: dict, peer: str, log: logging.Logger) -> str:
-    """``json.dumps`` the frame; an unserializable payload becomes a JSON-RPC error frame carrying
-    the original id. Shared by every transport: without it the TypeError escaped from a pool
-    worker (the executor swallows it), so the client waited forever with no log line (#92506)."""
+    """Encode the frame (orjson when importable, else ``json.dumps``); an unserializable
+    payload becomes a JSON-RPC error frame carrying the original id. Shared by every
+    transport: without it the TypeError escaped from a pool worker (the executor
+    swallows it), so the client waited forever with no log line (#92506)."""
+    from tui_gateway.json_codec import dumps
     try:
-        return json.dumps(obj, ensure_ascii=False)
+        return dumps(obj)
     except (TypeError, ValueError) as exc:
         rid = obj.get("id") if isinstance(obj, dict) else None
         log.error("frame serialization failed peer=%s id=%s error_type=%s error=%s",
                   peer, rid, type(exc).__name__, exc)
         fallback = {"jsonrpc": "2.0", "id": rid,
                     "error": {"code": -32603, "message": f"response serialization error: {exc}"}}
-        return json.dumps(fallback, ensure_ascii=False)
+        return dumps(fallback)
 
 
 class StdioTransport:
@@ -108,12 +110,17 @@ class StdioTransport:
     def write(self, obj: dict) -> bool:
         """Return ``True`` on success, ``False`` ONLY when the peer is gone (see :func:`_raise_unless_peer_gone`)."""
         # Serialization is OUTSIDE the lock so a large payload can't block other threads' frames.
-        line = serialize_frame(obj, "stdio", logger) + "\n"
+        return self.write_wire(serialize_frame(obj, "stdio", logger))
+
+    def write_wire(self, line: str) -> bool:
+        """Emit one already-serialized JSON frame (no trailing newline required)."""
+        if not line.endswith("\n"):
+            line = line + "\n"
         with self._lock:
             stream = self._stream_getter()
             try:
                 stream.write(line)
-            except Exception as e:
+            except Exception as e:  # health: allow BLE001 -- moved unchanged from write(); _raise_unless_peer_gone re-raises real I/O
                 _raise_unless_peer_gone(e, "write")
                 return False
             # A flush that *raises* peer-gone means the dispatcher should exit cleanly; one that *hangs*
@@ -121,7 +128,7 @@ class StdioTransport:
             if not _DISABLE_FLUSH:
                 try:
                     stream.flush()
-                except Exception as e:
+                except Exception as e:  # health: allow BLE001 -- moved unchanged from write(); _raise_unless_peer_gone re-raises real I/O
                     _raise_unless_peer_gone(e, "flush")
                     return False
         return True
@@ -237,29 +244,7 @@ class FanoutTransport:
                 peer.pending.clear()
                 peer.pending_bytes = 0
             try:
-                # Duck-typed on purpose: importing ``tui_gateway.ws`` here would pull
-                # ``tui_gateway.server`` in on this drain thread, racing any concurrent
-                # importer with a partially initialized module.
-                write_current = getattr(peer.transport, "write_many_if_current_async", None)
-                write_many = write_current or getattr(peer.transport, "write_many_async", None)
-                loop = getattr(peer.transport, "_loop", None)
-                if write_many is not None and loop is not None:
-                    # write() acknowledges buffered tokens/timeouts, not socket
-                    # progress. Await the real send so WS cannot move an
-                    # unbounded backlog underneath this bounded mailbox.
-                    from agent.async_utils import safe_schedule_threadsafe
-                    frames = [frame for frame, _size in batch]
-                    if write_current is not None:
-                        send = write_current(frames, lambda generation=generation: self._is_current(peer, generation))
-                    elif self._is_current(peer, generation):
-                        send = write_many(frames)
-                    else:
-                        continue
-                    future = safe_schedule_threadsafe(send, loop)
-                    ok = future is not None and future.result()
-                else:
-                    ok = all(not self._is_current(peer, generation) or peer.transport.write(frame)
-                             for frame, _size in batch)
+                ok = self._send_peer_batch(peer, batch, generation)
             except Exception:
                 logger.debug("fanout write failed; pruning peer", exc_info=True)
                 ok = False
@@ -270,6 +255,45 @@ class FanoutTransport:
                     peer.writing = False
                     self._remove(peer)
                 return
+
+    def _send_peer_batch(self, peer: _FanoutPeer, batch: list, generation: int) -> bool:
+        """Deliver one already-serialized batch. Prefer a wire-string send so N
+        subscribers do not re-``dumps`` the same frame; fall back to dict write
+        for duck-typed test sockets that only speak ``write_many_*``."""
+        wires = [wire for wire, _size in batch]
+        loop = getattr(peer.transport, "_loop", None)
+        write_lines_current = getattr(peer.transport, "write_many_lines_if_current_async", None)
+        write_lines = write_lines_current or getattr(peer.transport, "write_many_lines_async", None)
+        if write_lines is not None and loop is not None:
+            from agent.async_utils import safe_schedule_threadsafe
+            if write_lines_current is not None:
+                send = write_lines_current(wires, lambda generation=generation: self._is_current(peer, generation))
+            elif self._is_current(peer, generation):
+                send = write_lines(wires)
+            else:
+                return True
+            future = safe_schedule_threadsafe(send, loop)
+            return bool(future is not None and future.result())
+        write_current = getattr(peer.transport, "write_many_if_current_async", None)
+        write_many = write_current or getattr(peer.transport, "write_many_async", None)
+        if write_many is not None and loop is not None:
+            from agent.async_utils import safe_schedule_threadsafe
+            frames = [json.loads(wire) for wire in wires]
+            if write_current is not None:
+                send = write_current(frames, lambda generation=generation: self._is_current(peer, generation))
+            elif self._is_current(peer, generation):
+                send = write_many(frames)
+            else:
+                return True
+            future = safe_schedule_threadsafe(send, loop)
+            return bool(future is not None and future.result())
+        write_wire = getattr(peer.transport, "write_wire", None)
+        if write_wire is not None:
+            return all(not self._is_current(peer, generation) or write_wire(wire) for wire in wires)
+        return all(
+            not self._is_current(peer, generation) or peer.transport.write(json.loads(wire))
+            for wire in wires
+        )
 
     def _signal_overflow_detach(self, transport: Transport) -> None:
         # Outside the fanout lock: abort()/close() may re-enter contains/detach, and
@@ -287,11 +311,11 @@ class FanoutTransport:
         replaces the dropped backlog, so a socket that is still healthy learns it must resume
         rather than silently continuing with partial history. Without such a notice the peer's
         transport is closed so the client notices, reconnects and replays."""
-        # Freeze the queued frame so a caller cannot mutate it after admission. Same serialization
-        # guard as the single-peer transports: an unserializable frame reaches every peer as -32603.
+        # Serialize ONCE. Every subscriber queues the same wire string; a caller
+        # cannot mutate it after admission. An unserializable frame reaches every
+        # peer as -32603 (same guard as the single-peer transports).
         encoded = serialize_frame(obj, "fanout", logger)
         size = len(encoded.encode("utf-8", errors="surrogatepass"))
-        frame = json.loads(encoded)
         overflowed: list[Transport] = []
         with self._lock:
             for peer in list(self._peers):
@@ -305,7 +329,8 @@ class FanoutTransport:
                     if notice is None:
                         overflowed.append(peer.transport)
                     else:
-                        peer.pending.append((notice, 0))
+                        notice_wire = serialize_frame(notice, "fanout", logger)
+                        peer.pending.append((notice_wire, 0))
                         if peer not in self._peers:
                             self._peers.append(peer)
                         if not peer.writing:
@@ -313,7 +338,7 @@ class FanoutTransport:
                             threading.Thread(target=self._drain, args=(peer,),
                                              name="tui-fanout", daemon=True).start()
                     continue
-                peer.pending.append((frame, size))
+                peer.pending.append((encoded, size))
                 peer.pending_bytes += size
                 if not peer.writing:
                     peer.writing = True

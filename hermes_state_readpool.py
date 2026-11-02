@@ -35,13 +35,18 @@ logger = logging.getLogger("hermes_state")
 _READ_POOL_MAX = 8
 
 # Ceiling ALIVE in this PROCESS across every state.db (a multiplexed gateway
-# opens one per profile); three profiles' worth, then readers degrade likewise.
-# _READ_POOL_MAX bounds one file. A multiplexed gateway serves N profiles from one process and each profile
-# has its OWN state.db, so a per-file ceiling still lets the descriptor cost grow with the profile count —
-# the same shape as the per-instance bug, one level out (#98573). Past it, readers on the (N+1)th file
-# degrade to their writer connection instead of opening descriptors, which is the same trade _READ_POOL_MAX
-# makes and for the same reason: a slow read path is recoverable, a process-wide EMFILE is not.
-_READ_POOL_PROCESS_MAX = 24
+# opens one per profile). _READ_POOL_MAX bounds one file. A multiplexed gateway
+# serves N profiles from one process and each profile has its OWN state.db, so a
+# per-file ceiling still lets the descriptor cost grow with the profile count —
+# the same shape as the per-instance bug, one level out (#98573). Past it,
+# readers on the (N+1)th file degrade to their writer connection instead of
+# opening descriptors, which is the same trade _READ_POOL_MAX makes and for the
+# same reason: a slow read path is recoverable, a process-wide EMFILE is not.
+# 24 was "three profiles' worth" and put a 43-profile host on the reclaim path
+# for every new read (~6% GIL self-time in _reclaim_idle_read_conn_anywhere).
+# 64 is eight files at the per-file cap, or ~1–2 idle reads on a large
+# multiplex; the fd-headroom gate is still the EMFILE backstop.
+_READ_POOL_PROCESS_MAX = 64
 
 # Warn past this many SessionDB handles on one file in one process (diagnostic:
 # writer connections cannot be rationed the way read connections can).
@@ -55,9 +60,13 @@ _HANDLES_PER_PATH_WARN = 4
 # So the read pool also yields when the PROCESS is close to its limit, whatever is consuming it.
 _FD_HEADROOM_RESERVE = 64
 
-# The fd count is a directory listing; cache it briefly so a read burst isn't a
+# The fd count is a directory listing; cache it so a read burst isn't a
 # syscall per query (staleness lets through at most the ceiling's worth of opens).
-_FD_USAGE_CACHE_SECONDS = 0.25
+# 0.25s was shorter than a dashboard/heartbeat burst: on macOS ``/dev/fd``
+# listdir of a 275-thread gateway was ~6% GIL self-time. 2s matches the
+# host-gateway memo window; the process/file permit ceilings still cap
+# concurrent opens inside the window.
+_FD_USAGE_CACHE_SECONDS = 2.0
 
 _process_read_permits = threading.BoundedSemaphore(_READ_POOL_PROCESS_MAX)
 
@@ -120,9 +129,10 @@ def _fd_headroom_ok() -> bool:
     with _fd_usage_lock:
         stamp, cached = _fd_usage_cache
         fresh = cached is not None and (now - stamp) < _FD_USAGE_CACHE_SECONDS
-    if not fresh:
-        cached = _open_fd_count()
-        with _fd_usage_lock:
+        if not fresh:
+            # Hold the lock across the listing so concurrent acquires share one
+            # listdir instead of each walking /dev/fd (the production stampede).
+            cached = _open_fd_count()
             _fd_usage_cache = (now, cached)
     if cached is None:
         return True
