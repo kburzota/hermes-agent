@@ -429,7 +429,7 @@ def _fmt_changes_requested(ev, n) -> tuple:
 
 
 def _fmt_block_loop_detected(ev, n) -> tuple:
-    """Re-blocked for the same cause past the limit and routed to `triage`.
+    """Re-blocked for the same cause past the limit and parked (sticky blocked).
 
     It emits no blocked/status event, so ping loudly here. A repeated-block
     circuit breaker establishes that orchestration attention is needed; it

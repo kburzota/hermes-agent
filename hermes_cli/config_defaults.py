@@ -1926,9 +1926,6 @@ DEFAULT_CONFIG = {
         # Assignee when the orchestrator can't match one to an installed profile; "" = default
         # profile. A task never ends up with assignee=None.
         "default_assignee": "",
-        # Global cap: positive int = the HOST never has more than N tasks 'running' across all
-        # boards and both dispatch lanes. None = ~MemTotal / 512 MiB clamped to [2, 8]; where
-        # MemTotal is unreadable (macOS/Windows) None means no cap.
         # Global concurrency cap (#33488): when set to a positive int, the HOST never has more than N tasks
         # in 'running' at once — counted across every active board and across both the ready and review
         # dispatch lanes (workers are OS processes sharing one machine's memory, so the cap bounds the
@@ -1939,10 +1936,7 @@ DEFAULT_CONFIG = {
         "max_in_progress": None,
         # Per-profile cap: positive int = no single profile runs more than N workers even if the
         # global caps allow; blocked tasks defer to the next tick. None = no per-profile cap. Useful
-        # when fan-out would saturate one profile's model/API quota/browser pool.
-        # Unset (None) means "no per-profile cap" — backward-compatible with existing installs. Useful for
-        # fan-out workflows that would otherwise saturate one profile's local model / API quota / browser
-        # pool while leaving other profiles idle. See #21582.
+        # when fan-out would saturate one profile's model/API quota/browser pool. See #21582.
         "max_in_progress_per_profile": None,
         # Per-home claim allowlist for boards shared across Hermes homes (#110995): profile names
         # this home's dispatcher may claim (list or comma-separated string). None = any existing
@@ -1950,6 +1944,10 @@ DEFAULT_CONFIG = {
         # root profile named "default", so on a shared kanban.db every home can otherwise claim
         # default-assigned cards.
         "dispatch_profiles": None,
+        # Sticky-blocked park on loop detection (False = legacy triage landing).
+        "park_block_loop": True,
+        # One parent support card when the loop reason names one other installed profile.
+        "block_loop_unblock_card": True,
         # Auto-run the decomposer on Triage tasks every tick. False = manual via `hermes kanban
         # decompose <id>` or the dashboard's Decompose button.
         "auto_decompose": True,

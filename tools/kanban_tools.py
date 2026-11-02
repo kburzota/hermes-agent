@@ -836,15 +836,22 @@ def _handle_block(args: dict, **kw) -> str:
                f"the completion judge will evaluate it.")
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid))
         _check(ok, f"could not block {tid} (unknown id or not in running/ready)")
-        landed_kind = kb.get_task(conn, tid).block_kind
+        landed_task = kb.get_task(conn, tid)
+        landed_kind = landed_task.block_kind if landed_task else None
         extra: dict = {"block_kind": landed_kind}
+        if landed_task and landed_task.block_recurrences >= kb.BLOCK_RECURRENCE_LIMIT:
+            extra["block_loop"] = True
+            extra["note"] = (
+                "repeated same-cause block; parked until an explicit unblock"
+            )
         if kind == "dependency" and landed_kind != kind:
             # block_task re-kinds a dependency wait that no open parent can satisfy.
             extra["requested_kind"] = kind
-            extra["note"] = (
+            extra.setdefault(
+                "note",
                 "kind='dependency' only waits on an incomplete parent; no parent is open, "
                 "so this was recorded as needs_input (sticky until a human unblocks) "
-                "instead of parking in todo where the dispatcher would respawn it."
+                "instead of parking in todo where the dispatcher would respawn it.",
             )
         return _ok_landed(kb, conn, tid, "blocked", **extra)
 
