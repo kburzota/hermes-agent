@@ -108,6 +108,15 @@ def fanout_stream(*, subscribers: int = 4, events: int = 400) -> dict[str, float
     stats["subscribers"] = float(subscribers)
     stats["events"] = float(events)
     stats["encode_only_us_per_event"] = (encode_cpu / (8 * events)) * 1_000_000
+    # The production bug: the same payload was dumps'd once per subscriber.
+    repeat_start = _cpu()
+    for _ in range(8):
+        for frame in frames:
+            for _peer in range(subscribers):
+                serialize_frame(frame, "bench", _log)
+    repeat_cpu = _cpu() - repeat_start
+    stats["encode_times_subscribers_cpu_s"] = repeat_cpu
+    stats["encode_repeat_over_once"] = (repeat_cpu / encode_cpu) if encode_cpu else 0.0
     return stats
 
 
@@ -161,6 +170,10 @@ _LOREM = (
     "The worker finished compiling the module and wrote 128 objects to the "
     "cache. Status: ok. elapsed=1.4s path=/tmp/build/out.o next=link.\n"
 )
+_CHAT = (
+    "I compared the three approaches and the third one is the only one that "
+    "keeps the cached prefix. The others rebuild the system prompt mid-turn.\n"
+)
 
 _CODE_DUMP = """\
 def connect(url, api_key=None, timeout=30):
@@ -176,11 +189,13 @@ SELECT id, status, claim_expires FROM tasks WHERE status = 'running';
 
 def _corpus() -> dict[str, str]:
     prose = _LOREM * 80  # ~10 KiB of punctuation-heavy prose (':' '=' '.' '+')
+    chat = _CHAT * 80  # no '=', so assignment / telegram / zhipu passes skip
     code = _CODE_DUMP * 40
     secret = prose + " exported OPENAI_API_KEY=sk-" + ("a" * 48) + "\n"
     status = "Running terminal command: pytest tests/gateway/test_fanout.py -q"
     return {
         "prose_10kib": prose,
+        "plain_chat": chat,
         "code_dump": code,
         "secret_bearing": secret,
         "status_line": status,

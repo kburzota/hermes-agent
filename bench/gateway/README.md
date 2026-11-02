@@ -41,11 +41,22 @@ touch `~/.hermes`.
 
 ## Measured numbers
 
-Filled in on this branch after the hot-path commits. Hardware: Linux CI-style
-VM, CPython 3.12, no orjson unless noted.
+Hardware: this cloud agent VM, CPython **3.14.9** (same family as production
+BIG-IRON), **orjson absent**. CPU times are `time.process_time` after one
+warm-up call.
 
-See the pull request body for the before/after table per commit. Re-run the
-commands above on `live-patches` vs this branch to reproduce.
+| Workload | Before (`live-patches`) | After (this branch) | Notes |
+|---|---|---|---|
+| `fanout_stream` (4 peers × 400 deltas) | 2723 µs / loop | 1787–2014 µs / loop | **1.35–1.5×**. Drain no longer re-`dumps` per peer. |
+| encode once vs ×4 subscribers | — | **3.86×** | Isolated `serialize_frame` repeat; this is the production bug. |
+| `redact` 10 KiB assignment-heavy prose | 2344 µs | ~2370 µs | Assignment/`=` path still dominates (expected). |
+| `redact` 11 KiB plain chat (no `=`) | (not split out) | **851 µs** | Telegram / Zhipu / header regexes skipped. |
+| `redact` 13 KiB code dump | 4649 µs | 4506–4597 µs | Small; `_PREFIX_RE` still runs when a prefix literal is present. |
+| `kanban_tick` 30 running, 12 ticks | 2577 µs / tick | 2599 µs / tick | Bench already used one connection; watcher path dropped the **second open + `to_thread` hop**. |
+| `json_dumps_compare` | orjson absent | orjson absent | Optional; install `orjson` locally to see the dumps speedup. |
+
+Re-run `python -m bench.gateway` on `live-patches` vs this branch to reproduce.
+Variance on a busy VM is a few percent; compare CPU, not wall.
 
 ## What this does *not* cover
 

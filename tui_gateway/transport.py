@@ -81,9 +81,10 @@ def _raise_unless_peer_gone(exc: Exception, what: str) -> None:
 
 
 def serialize_frame(obj: dict, peer: str, log: logging.Logger) -> str:
-    """``json.dumps`` the frame; an unserializable payload becomes a JSON-RPC error frame carrying
-    the original id. Shared by every transport: without it the TypeError escaped from a pool
-    worker (the executor swallows it), so the client waited forever with no log line (#92506)."""
+    """Encode the frame (orjson when importable, else ``json.dumps``); an unserializable
+    payload becomes a JSON-RPC error frame carrying the original id. Shared by every
+    transport: without it the TypeError escaped from a pool worker (the executor
+    swallows it), so the client waited forever with no log line (#92506)."""
     from tui_gateway.json_codec import dumps
     try:
         return dumps(obj)
@@ -119,7 +120,7 @@ class StdioTransport:
             stream = self._stream_getter()
             try:
                 stream.write(line)
-            except Exception as e:
+            except Exception as e:  # health: allow BLE001 -- moved unchanged from write(); _raise_unless_peer_gone re-raises real I/O
                 _raise_unless_peer_gone(e, "write")
                 return False
             # A flush that *raises* peer-gone means the dispatcher should exit cleanly; one that *hangs*
@@ -127,7 +128,7 @@ class StdioTransport:
             if not _DISABLE_FLUSH:
                 try:
                     stream.flush()
-                except Exception as e:
+                except Exception as e:  # health: allow BLE001 -- moved unchanged from write(); _raise_unless_peer_gone re-raises real I/O
                     _raise_unless_peer_gone(e, "flush")
                     return False
         return True

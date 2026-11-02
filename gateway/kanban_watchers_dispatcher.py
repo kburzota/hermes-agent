@@ -236,7 +236,8 @@ class _KanbanDispatcher:
             ready = kbd.has_spawnable_ready(conn)
             if not ready and kbd.review_dispatch_enabled():
                 ready = kbd.has_spawnable_review(conn)
-        except Exception:
+        except Exception:  # health: allow BLE001 -- same fail-open as the old ready_nonempty scan; one board must not abort the tick
+            logger.debug("kanban dispatcher: ready probe failed", exc_info=True)
             return
         if ready:
             self._last_ready_nonempty = True
@@ -268,7 +269,8 @@ class _KanbanDispatcher:
                     conn = _kbc().connect(board=slug)
                     if kbd.has_spawnable_ready(conn) or (_review_probe and kbd.has_spawnable_review(conn)):
                         return True
-                except Exception:
+                except Exception:  # health: allow BLE001 -- moved unchanged from ready_nonempty; one board must not abort the scan
+                    logger.debug("kanban dispatcher: ready scan failed on %s", slug, exc_info=True)
                     continue
                 finally:
                     if conn is not None:
