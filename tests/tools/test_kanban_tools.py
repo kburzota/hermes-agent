@@ -587,6 +587,7 @@ def test_block_dependency_without_open_parent_is_rekinded(worker_env):
     assert (d["ok"], d["status"], d["block_kind"]) == (True, "blocked", "needs_input")
     assert d["requested_kind"] == "dependency"
     assert "no parent is open" in d["note"]
+    assert "kanban_link" in d["warning"]
 
 
 def test_heartbeat_extends_claim_expires(worker_env):
