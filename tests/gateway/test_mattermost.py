@@ -394,6 +394,52 @@ class TestMattermostMentionBehavior:
             assert self.adapter.handle_message.called
 
 
+class TestMattermostThreadWake(TestMattermostMentionBehavior):
+    """Thread replies wake the bot without @mention when it is in the thread."""
+
+    def _event(self, message, root_id="root1"):
+        ev = self._make_event(message)
+        post = json.loads(ev["data"]["post"])
+        if root_id:
+            post["root_id"] = root_id
+        ev["data"]["post"] = json.dumps(post)
+        return ev
+
+    async def _run(self, message, thread_authors, root_id="root1", env=None):
+        thread = {"posts": {f"p{i}": {"user_id": u} for i, u in enumerate(thread_authors)}}
+        self.adapter._api_get = AsyncMock(return_value=thread)
+        with patch.dict(os.environ, env or {}):
+            for k in ("MATTERMOST_REQUIRE_MENTION", "MATTERMOST_FREE_RESPONSE_CHANNELS"):
+                os.environ.pop(k, None)
+            await self.adapter._handle_ws_event(self._event(message, root_id))
+        return self.adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_bot_rooted_thread_wakes(self):
+        assert await self._run("thanks", ["bot_user_id", "user_123"])
+
+    @pytest.mark.asyncio
+    async def test_bot_replied_in_thread_wakes(self):
+        assert await self._run("and then?", ["user_123", "bot_user_id", "user_123"])
+
+    @pytest.mark.asyncio
+    async def test_mention_of_other_user_ignored(self):
+        assert not await self._run("@bob can you check", ["bot_user_id"])
+
+    @pytest.mark.asyncio
+    async def test_untouched_thread_ignored(self):
+        assert not await self._run("hello", ["user_123", "user_456"])
+
+    @pytest.mark.asyncio
+    async def test_top_level_post_ignored(self):
+        assert not await self._run("hello", ["bot_user_id"], root_id="")
+
+    @pytest.mark.asyncio
+    async def test_toggle_true_restores_mention_requirement(self):
+        assert not await self._run("thanks", ["bot_user_id"], env={"MATTERMOST_THREAD_REQUIRE_MENTION": "true"})
+
+
+
 # ---------------------------------------------------------------------------
 # File upload (send_image)
 # ---------------------------------------------------------------------------
