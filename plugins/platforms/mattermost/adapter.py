@@ -493,7 +493,17 @@ class MattermostAdapter(BasePlatformAdapter):
                 logger.info("Mattermost: WebSocket closed (%s)", kind)
                 break
 
-    def _apply_channel_gating(self, channel_id: str, message_text: str) -> Optional[str]:
+    async def _bot_in_thread(self, root_id: str) -> bool:
+        """True if this bot authored the thread root or any reply. Stateless (asks the server), so it survives restarts."""
+        posts = (await self._api_get(f"posts/{root_id}/thread")).get("posts") or {}
+        return any(p.get("user_id") == self._bot_user_id for p in posts.values())
+
+    def _mentions_other(self, message_text: str) -> bool:
+        """True if the text @mentions someone other than this bot (@here/@channel/@all don't count)."""
+        ours = {self._bot_username.lower(), self._bot_user_id.lower(), "here", "channel", "all"}
+        return any(m.lower() not in ours for m in re.findall(r"(?<![\w@])@([A-Za-z0-9][A-Za-z0-9._-]*)", message_text))
+
+    def _apply_channel_gating(self, channel_id: str, message_text: str, in_bot_thread: bool = False) -> Optional[str]:
         """Mention-gate a non-DM post; return the cleaned text, or None to ignore it. allowed_channels is a
         whitelist checked first (@mentions elsewhere are ignored); require_mention (default true) is
         bypassed in free_response_channels."""
@@ -507,6 +517,8 @@ class MattermostAdapter(BasePlatformAdapter):
             _extra_or_secret(self.config.extra, "free_response_channels", "MATTERMOST_FREE_RESPONSE_CHANNELS", blank_is_unset=False))
         mention_patterns = [f"@{self._bot_username}", f"@{self._bot_user_id}"]
         has_mention = any(pattern.lower() in message_text.lower() for pattern in mention_patterns)
+        if in_bot_thread and not has_mention:  # caller verified bot participation; @someone-else replies stay gated
+            require_mention = self._mentions_other(message_text)
         if require_mention and channel_id not in free_channels and not has_mention:
             logger.debug("Mattermost: skipping non-DM message without @mention (channel=%s)", channel_id)
             return None
@@ -563,7 +575,14 @@ class MattermostAdapter(BasePlatformAdapter):
         channel_id, is_dm = post.get("channel_id", ""), data.get("channel_type", "O") == "D"
         message_text = post.get("message", "")
         if not is_dm:  # DMs need no gating; channels are mention-gated.
-            message_text = self._apply_channel_gating(channel_id, message_text)
+            root_id = post.get("root_id")
+            thread_open = root_id and str(_extra_or_secret(
+                self.config.extra, "thread_require_mention", "MATTERMOST_THREAD_REQUIRE_MENTION", "false",
+                blank_is_unset=False)).lower() in {"false", "0", "no"}
+            # shortcut: one thread GET per unmentioned thread reply, no cache; add one if the call rate hurts.
+            in_thread = bool(thread_open) and self._bot_username.lower() not in message_text.lower() \
+                and await self._bot_in_thread(root_id)
+            message_text = self._apply_channel_gating(channel_id, message_text, in_thread)
             if message_text is None:
                 return
         # Thread support: replies use root_id; in thread mode a top-level channel post is itself a valid root.
@@ -701,6 +720,7 @@ def interactive_setup() -> None:
 
 _YAML_BRIDGE = (  # (yaml key, env var, kind) for apply_yaml_bridge; allowed_channels is a whitelist
     ("require_mention", "MATTERMOST_REQUIRE_MENTION", "lower"),
+    ("thread_require_mention", "MATTERMOST_THREAD_REQUIRE_MENTION", "lower"),
     ("free_response_channels", "MATTERMOST_FREE_RESPONSE_CHANNELS", "csv"),
     ("allowed_channels", "MATTERMOST_ALLOWED_CHANNELS", "csv"))
 
