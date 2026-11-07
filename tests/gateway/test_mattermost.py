@@ -394,6 +394,60 @@ class TestMattermostMentionBehavior:
             assert self.adapter.handle_message.called
 
 
+class TestMattermostThreadReplies:
+    """T-11: unmentioned replies in a thread the bot is part of pass the mention gate."""
+
+    def setup_method(self):
+        self.adapter = _make_adapter()
+        self.adapter._bot_user_id = "bot_user_id"
+        self.adapter._bot_username = "hermes-bot"
+        self.adapter.handle_message = AsyncMock()
+
+    def _event(self, message, root_id="root1"):
+        post = {"id": "p1", "user_id": "user_123", "channel_id": "chan_456", "message": message}
+        if root_id:
+            post["root_id"] = root_id
+        return {"event": "posted", "data": {"post": json.dumps(post), "channel_type": "O", "sender_name": "@alice"}}
+
+    async def _run(self, message, thread_users, root_id="root1", env=None):
+        self.adapter._api_get = AsyncMock(return_value={"posts": {f"x{i}": {"user_id": u} for i, u in enumerate(thread_users)}})
+        with patch.dict(os.environ, env or {}):
+            for k in ("MATTERMOST_REQUIRE_MENTION", "MATTERMOST_FREE_RESPONSE_CHANNELS", "MATTERMOST_THREAD_REQUIRE_MENTION"):
+                if not env or k not in env:
+                    os.environ.pop(k, None)
+            await self.adapter._handle_ws_event(self._event(message, root_id))
+        return self.adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_bot_rooted_thread_passes(self):
+        assert await self._run("done", ["bot_user_id"])
+
+    @pytest.mark.asyncio
+    async def test_bot_replied_in_thread_passes(self):
+        assert await self._run("done", ["user_123", "bot_user_id"])
+
+    @pytest.mark.asyncio
+    async def test_reply_mentioning_other_ignored(self):
+        assert not await self._run("@ian take this", ["bot_user_id"])
+
+    @pytest.mark.asyncio
+    async def test_untouched_thread_ignored(self):
+        assert not await self._run("done", ["user_123"])
+
+    @pytest.mark.asyncio
+    async def test_top_level_unmentioned_ignored(self):
+        assert not await self._run("done", ["bot_user_id"], root_id=None)
+
+    @pytest.mark.asyncio
+    async def test_toggle_restores_mention_requirement(self):
+        assert not await self._run("done", ["bot_user_id"], env={"MATTERMOST_THREAD_REQUIRE_MENTION": "true"})
+
+    @pytest.mark.asyncio
+    async def test_mention_still_stripped_in_thread(self):
+        assert await self._run("@hermes-bot hi", ["bot_user_id"])
+        assert self.adapter.handle_message.call_args[0][0].text == "hi"
+
+
 # ---------------------------------------------------------------------------
 # File upload (send_image)
 # ---------------------------------------------------------------------------
