@@ -853,6 +853,11 @@ def _handle_block(args: dict, **kw) -> str:
                 "so this was recorded as needs_input (sticky until a human unblocks) "
                 "instead of parking in todo where the dispatcher would respawn it.",
             )
+            extra["warning"] = (
+                "Block was rekinded to needs_input and flagged as a stranded dependency for "
+                "Doug. If a helper card exists, call kanban_link(parent=<card>, child=<self>) "
+                "and block again with kind='dependency' to fix it in this run."
+            )
         return _ok_landed(kb, conn, tid, "blocked", **extra)
 
 

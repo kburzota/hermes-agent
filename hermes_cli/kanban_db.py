@@ -3190,6 +3190,9 @@ def edit_task(
     return True
 
 
+STRANDED_DEPENDENCY_HEADER = "⚪ DOUG: stranded dependency block, link its parent or unblock"
+
+
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
@@ -3245,15 +3248,38 @@ def block_task(
         # kind with none open would park in ``todo`` and ``recompute_ready``
         # would promote+respawn it context-free on the next tick. Re-kind to
         # ``needs_input`` so it is sticky until a human unblocks.
+        auto_linked: list[str] = []
         if kind == "dependency" and _parents_satisfied(conn, task_id):
-            kind = "needs_input"
-            rekind_reason = "no_open_parent"
+            # Helper cards this run created but never linked: link them now so
+            # the wait is real. Older-run, finished and descendant cards are skipped.
+            auto_linked = [
+                r["id"] for r in conn.execute(
+                    "SELECT t.id FROM tasks t JOIN task_events e "
+                    "ON e.task_id = t.id AND e.kind = 'created' "
+                    "WHERE json_extract(e.payload, '$.creator_task_id') = ? "
+                    "AND t.id != ? AND t.status NOT IN ('done', 'archived') "
+                    "AND e.created_at >= COALESCE((SELECT r.started_at FROM task_runs r "
+                    "WHERE r.id = (SELECT current_run_id FROM tasks WHERE id = ?)), 0) "
+                    "ORDER BY t.id", (task_id, task_id, task_id),
+                ).fetchall()
+                if not _would_cycle(conn, r["id"], task_id)
+            ]
+            for pid in auto_linked:
+                _link(conn, pid, task_id)
+                _append_event(conn, task_id, "linked", {"parent": pid, "child": task_id, "auto": True})
+            if not auto_linked:
+                kind = "needs_input"
+                rekind_reason = "no_open_parent"
+                # Stranded wait: Doug clears it (red/orange headers are reserved for Kyle's steps).
+                reason = f"{STRANDED_DEPENDENCY_HEADER}\n{reason or ''}".rstrip()
         from hermes_cli.kanban_db_block_loop import park_block_loop_enabled, route_block
         new_status, event_kind, set_sql, params, payload = route_block(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
             loop_landing="blocked" if park_block_loop_enabled() else "triage",
         )
+        if auto_linked:
+            payload["auto_linked_parents"] = auto_linked
         if rekind_reason:
             payload["requested_kind"] = requested_kind
             payload["rekind_reason"] = rekind_reason
