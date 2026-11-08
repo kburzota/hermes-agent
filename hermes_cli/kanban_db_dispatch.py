@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import signal
@@ -83,6 +84,11 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
     r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+",
     re.IGNORECASE,
 )
+_PR_LOOKUP_TTL = 300  # seconds a gh answer (or failure) is reused across ticks
+_PR_LOOKUP_TIMEOUT = 15
+_pr_lookup_cache: dict[str, tuple[float, Any]] = {}
+# Why ``active_pr`` held a card this tick; the dispatcher pops it into the event payload.
+_active_pr_detail: dict[str, str] = {}
 
 
 @dataclass
@@ -1571,9 +1577,9 @@ def check_respawn_guard(
     ready lane only ``"recent_success"`` (completed run within the window, unless
     a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
     (PR URL in a recent comment; re-spawning risks a duplicate PR — unless a
-    handoff event followed the comment: the named profile must work on that
-    PR). The review lane skips the last two: they are the *inputs* to a review
-    handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
+    handoff or ``unblocked`` event followed the comment, or ``gh`` says no linked
+    PR is open and the card owner's; see ``_active_pr_reason``). The review
+    lane skips the last two: they are the *inputs* to a review handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
     passes own those.
     """
     row = conn.execute(
@@ -1645,17 +1651,74 @@ def check_respawn_guard(
     #    now work on THAT PR — a closer or the implementer finishing it, not a
     #    duplicate implementation (#111910). A crash/reclaim is not a handoff,
     #    so the worker that opened the PR is still not re-spawned against it.
-    pr_times = [t for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
-                                          cols=", body", unreadable=now)  # duplicate-PR risk: fail closed
-                if _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(c["body"]) or "")]
-    if pr_times:
+    pr_rows = [(t, c) for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
+                                              cols=", body, author", unreadable=now)  # duplicate-PR risk: fail closed
+               if _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(c["body"]) or "")]
+    if pr_rows:
         # Strictly after: a same-second tie stays guarded (fail closed).
         if any(_is_handoff_event(e["kind"], e["payload"]) for _, e in _rows_since(
-                conn, "task_events", task_id, max(pr_times),
+                conn, "task_events", task_id, max(t for t, _ in pr_rows),
                 "AND kind IN ('assigned', 'changes_requested', 'review_reopened')", cols=", kind, payload", strict=True)):
             return None
-        return "active_pr"
+        # An explicit unblock after the PR comment is a deliberate "resume" (as for
+        # recent_success); the resumed worker sees the PR in its comment thread.
+        if any(_rows_since(conn, "task_events", task_id, max(t for t, _ in pr_rows),
+                           "AND kind = 'unblocked'", strict=True)):
+            return None
+        return _active_pr_reason(conn, task_id, pr_rows)
 
+    return None
+
+
+def _gh_pr_view(url: str) -> dict:
+    """``gh pr view <url> --json state,author,headRefName``; raises on any failure."""
+    out = subprocess.run(
+        ["gh", "pr", "view", url, "--json", "state,author,headRefName"],
+        capture_output=True, text=True, timeout=_PR_LOOKUP_TIMEOUT, check=True, stdin=subprocess.DEVNULL,
+    )
+    return json.loads(out.stdout)
+
+
+def _pr_info(url: str) -> Any:
+    """Cached ``_gh_pr_view``: the PR dict, or the exception the lookup raised."""
+    now = time.monotonic()
+    hit = _pr_lookup_cache.get(url)
+    if hit is not None and hit[0] > now:
+        return hit[1]
+    try:
+        info: Any = _gh_pr_view(url)
+    except Exception as exc:  # gh missing, timeout, auth, unknown PR, bad JSON
+        info = exc
+    _pr_lookup_cache[url] = (now + _PR_LOOKUP_TTL, info)
+    return info
+
+
+def _active_pr_reason(conn: sqlite3.Connection, task_id: str, pr_rows: list) -> Optional[str]:
+    """``"active_pr"`` while a linked PR is open and the card owner's (authored by the
+    assignee, on its branch, or linked by it), or when gh can't say (fail closed).
+    Merged/closed PRs and other agents' PRs don't hold the card (agent-kit#87)."""
+    task = conn.execute("SELECT assignee, branch_name FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    who = ((task["assignee"] if task else None) or "").lower()
+    branch = ((task["branch_name"] if task else None) or "").lower()
+    linked_by: dict[str, set] = {}
+    for _, c in pr_rows:
+        for url in _RESPAWN_GUARD_PR_URL_RE.findall(_kb._lossy_text(c["body"]) or ""):
+            linked_by.setdefault(url, set()).add((_kb._lossy_text(c["author"]) or "").lower())
+    for url, authors in linked_by.items():
+        info = _pr_info(url)
+        if not isinstance(info, dict):
+            err = getattr(info, "stderr", None) or str(info)
+            _active_pr_detail[task_id] = f"gh lookup failed for {url}: {str(err).strip()[:200]}"
+            return "active_pr"
+        if str(info.get("state") or "").upper() in ("MERGED", "CLOSED"):
+            continue
+        head = str(info.get("headRefName") or "").lower()
+        login = str((info.get("author") or {}).get("login") or "").lower()
+        owned = task_id[2:].lower() in head or (branch and head == branch) or (
+            who and (login == who or head.startswith(who + "/") or who in authors))
+        if owned:
+            _active_pr_detail[task_id] = f"open PR owned by this card: {url}"
+            return "active_pr"
     return None
 
 
@@ -2100,6 +2163,7 @@ def _dispatch_lane_task(
             result.skipped_per_profile_capped.append((task_id, assignee, current))
             return False
     guard_reason = check_respawn_guard(conn, task_id, lane=lane)
+    guard_detail = _active_pr_detail.pop(task_id, None)
     if guard_reason is not None:
         result.respawn_guarded.append((task_id, guard_reason))
         # Event so ``hermes kanban tail`` shows why the task looks stuck.
@@ -2111,7 +2175,8 @@ def _dispatch_lane_task(
         # owned by ``kanban.default_assignee``, not "unassigned but secretly routed".
         if not dry_run:
             with _kb.write_txn(conn):
-                _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
+                _kb._append_event(conn, task_id, "respawn_guarded", (
+                    {"reason": guard_reason, "detail": guard_detail} if guard_detail else {"reason": guard_reason}))
         return False
 
     def _count_spawn(name: str) -> None:

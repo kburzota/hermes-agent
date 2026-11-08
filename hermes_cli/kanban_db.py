@@ -1233,8 +1233,12 @@ def create_task(
     project_source_task_id: Optional[str] = None,
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
+    supersedes: Optional[str] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
+
+    ``supersedes``: in the same transaction, move that card's dependents onto the
+    new task and archive it (refused if it is running, done or archived).
 
     Status: ``ready`` unless a parent is not ``done`` (``todo``); ``triage=True``
     forces ``triage``; ``initial_status="blocked"`` parks it for human ops.
@@ -1388,11 +1392,40 @@ def create_task(
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 inherit_creator_origin(conn, task_id, creator_task_id, created_at=now)
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
+                if supersedes:
+                    _supersede_in_txn(conn, supersedes, task_id)
+            if supersedes and not conn.in_transaction:
+                _cleanup_workspace(conn, supersedes)
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
                 raise
     raise RuntimeError("unreachable")
+
+
+def _supersede_in_txn(conn: sqlite3.Connection, old_id: str, new_id: str) -> None:
+    """Move ``old_id``'s dependents onto ``new_id``, then archive ``old_id``. Caller holds
+    the write txn, so a refusal rolls back the new card too (agent-kit#87)."""
+    status = _task_status(conn, old_id)
+    if status is None:
+        raise ValueError(f"unknown task: {old_id}")
+    if status in ("running", "done", "archived"):
+        raise ValueError(f"cannot supersede {old_id}: it is {status}")
+    moved = []
+    for child in child_ids(conn, old_id):
+        if _would_cycle(conn, new_id, child):
+            raise ValueError(f"cannot supersede {old_id}: moving {child} under {new_id} would create a cycle")
+        conn.execute("DELETE FROM task_links WHERE parent_id = ? AND child_id = ?", (old_id, child))
+        _link(conn, new_id, child)
+        _append_event(conn, child, "linked", {"parent": new_id, "child": child, "superseded": old_id})
+        moved.append(child)
+    conn.execute(
+        "UPDATE tasks SET status = 'archived', claim_lock = NULL, claim_expires = NULL, "
+        "worker_pid = NULL, worker_started_at = NULL WHERE id = ?", (old_id,),
+    )
+    run_id = _end_run(conn, old_id, outcome="reclaimed", status="reclaimed", summary=f"superseded by {new_id}")
+    _append_event(conn, old_id, "archived", {"superseded_by": new_id, "moved_children": moved}, run_id=run_id)
+    _append_event(conn, new_id, "supersedes", {"task": old_id, "moved_children": moved})
 
 
 def _board_meta_for(board: Optional[str]) -> dict:
