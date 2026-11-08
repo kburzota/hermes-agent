@@ -427,6 +427,11 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "synthesizer task."
             ),
         },
+        "supersedes": _prop("string", (
+                "Id of a card this one replaces. Its dependents move onto the new card "
+                "and it is archived, in one step. Refused if that card is running, done "
+                "or archived."
+        )),
         "tenant": _prop("string", (
                 "Optional namespace for multi-project isolation. "
                 "Defaults to HERMES_TENANT env if set."

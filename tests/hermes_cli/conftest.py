@@ -20,6 +20,19 @@ def all_assignees_spawnable(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_gh_pr_lookup(monkeypatch):
+    """The ``active_pr`` guard shells out to ``gh``; tests never hit the network.
+    Default: the lookup fails, so the guard stays fail-closed as before."""
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    def _fail(url):
+        raise RuntimeError("gh disabled in tests")
+    monkeypatch.setattr(kbd, "_gh_pr_view", _fail)
+    monkeypatch.setattr(kbd, "_pr_lookup_cache", {})
+    monkeypatch.setattr(kbd, "_active_pr_detail", {})
+
+
+@pytest.fixture(autouse=True)
 def _suppress_concurrent_hermes_gate(request, monkeypatch):
     """Default ``_detect_concurrent_hermes_instances`` to ``[]`` for every test.
 
