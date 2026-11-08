@@ -3224,11 +3224,41 @@ def edit_task(
 
 
 STRANDED_DEPENDENCY_HEADER = "⚪ DOUG: stranded dependency block, link its parent or unblock"
+_CARD_ID_RE = re.compile(r"\bt_[0-9a-f]{8}\b")
+# Kinds whose reason may name the card being waited on; capability/transient are left alone.
+_NAMED_CARD_KINDS = (None, "needs_input", "dependency")
+
+
+class BlockerCleared(ValueError):
+    """``block_task`` refused: every card the reason names is already done."""
+
+
+def named_cards(conn: sqlite3.Connection, task_id: str, reason: Optional[str]):
+    """Card ids in *reason* on this board, other than *task_id*, split into
+    ``(open, not_linkable, done)``; ``not_linkable`` maps id -> why. A card on
+    another board has no row here, so it reads as "not on this board"."""
+    open_ids: list[str] = []
+    not_linkable: dict[str, str] = {}
+    done: list[str] = []
+    for cid in dict.fromkeys(_CARD_ID_RE.findall(reason or "")):
+        if cid == task_id:
+            continue
+        status = _task_status(conn, cid)
+        if status is None:
+            not_linkable[cid] = "not on this board"
+        elif status in ("done", "archived"):
+            done.append(cid)
+        elif _would_cycle(conn, cid, task_id):
+            not_linkable[cid] = "would create a cycle"
+        else:
+            open_ids.append(cid)
+    return open_ids, not_linkable, done
 
 
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
+    link_named: bool = False,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / loop-park, see
     :func:`hermes_cli.kanban_db_block_loop.route_block`). ``kind='dependency'``
@@ -3236,6 +3266,11 @@ def block_task(
     ``recompute_ready`` cannot promote it into a context-free respawn.
     ``transient`` still counts toward the loop breaker so a forever-flaky
     task escalates. True on any transition.
+
+    With ``link_named`` (worker tool and CLI only, never system blocks), open
+    cards the reason names become parents and the block lands as
+    ``dependency``; see :func:`named_cards`. Raises :class:`BlockerCleared`
+    (nothing written) when every named card is already done.
 
     An already-``blocked`` card that the failure breaker parked UNTYPED
     (``block_kind IS NULL``, no live run) is classified in place when *kind*
@@ -3277,12 +3312,25 @@ def block_task(
         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"
         requested_kind = kind
         rekind_reason = None
+        # A reason that names the card it waits on becomes a real parent link,
+        # so the wait clears itself instead of sitting until a human unblocks.
+        # Any unlinkable id (other board, unknown, cycle) keeps it a human block.
+        named_open: list[str] = []
+        named_not_linked: dict[str, str] = {}
+        if link_named and kind in _NAMED_CARD_KINDS:
+            named_open, named_not_linked, named_done = named_cards(conn, task_id, reason)
+            if named_done and not named_open and not named_not_linked:
+                raise BlockerCleared(f"blocker cleared: {', '.join(named_done)} already done; keep working")
+            if named_not_linked:
+                named_open = []
+            if named_open:
+                kind = "dependency"
         # ``dependency`` only waits on incomplete parents. A worker filing that
         # kind with none open would park in ``todo`` and ``recompute_ready``
         # would promote+respawn it context-free on the next tick. Re-kind to
         # ``needs_input`` so it is sticky until a human unblocks.
         auto_linked: list[str] = []
-        if kind == "dependency" and _parents_satisfied(conn, task_id):
+        if kind == "dependency" and not named_open and _parents_satisfied(conn, task_id):
             # Helper cards this run created but never linked: link them now so
             # the wait is real. Older-run, finished and descendant cards are skipped.
             auto_linked = [
@@ -3297,9 +3345,6 @@ def block_task(
                 ).fetchall()
                 if not _would_cycle(conn, r["id"], task_id)
             ]
-            for pid in auto_linked:
-                _link(conn, pid, task_id)
-                _append_event(conn, task_id, "linked", {"parent": pid, "child": task_id, "auto": True})
             if not auto_linked:
                 kind = "needs_input"
                 rekind_reason = "no_open_parent"
@@ -3311,8 +3356,10 @@ def block_task(
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
             loop_landing="blocked" if park_block_loop_enabled() else "triage",
         )
-        if auto_linked:
-            payload["auto_linked_parents"] = auto_linked
+        if auto_linked or named_open:
+            payload["auto_linked_parents"] = auto_linked or named_open
+        if named_not_linked:
+            payload["named_cards_not_linked"] = named_not_linked
         if rekind_reason:
             payload["requested_kind"] = requested_kind
             payload["rekind_reason"] = rekind_reason
@@ -3332,6 +3379,15 @@ def block_task(
             params = (*params, int(expected_run_id))
         if conn.execute(sql, params).rowcount != 1:
             return False
+        # Links go in only once the block itself landed, so a refused block leaves none.
+        for pid in named_open or auto_linked:
+            _link(conn, pid, task_id)
+            _append_event(conn, task_id, "linked", {"parent": pid, "child": task_id, "auto": True})
+        if named_open or auto_linked:
+            _append_event(conn, task_id, "auto_linked", {
+                "parents": named_open or auto_linked, "requested_kind": requested_kind,
+                "source": "reason" if named_open else "same_run_helper",
+            })
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
         )

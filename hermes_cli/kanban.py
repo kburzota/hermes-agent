@@ -987,13 +987,24 @@ def _cmd_block(args: argparse.Namespace) -> int:
     ids = _bulk_ids(args)
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
+        cleared: dict[str, str] = {}
+
         def ok_msg(tid):
+            if tid in cleared:
+                return f"Not blocked {tid}: {cleared[tid]}"
             # Report where it landed: dependency -> todo, loop-park -> blocked (or triage if opted out).
             landed = kb.get_task(conn, tid)
             where = landed.status if landed else "blocked"
             looped = bool(landed and landed.block_recurrences >= kb.BLOCK_RECURRENCE_LIMIT)
+            linked = [p for p in kb.parent_ids(conn, tid) if p in (reason or "")]
             if where == "todo":
-                return f"{tid} → todo (dependency wait){suffix}"
+                via = f", linked to {', '.join(linked)}" if linked else ""
+                return f"{tid} → todo (dependency wait{via}){suffix}"
+            if where == "blocked" and kind in (None, "needs_input"):
+                _, not_linked, _ = kb.named_cards(conn, tid, reason)
+                if not_linked:
+                    why = ", ".join(f"{k} ({v})" for k, v in not_linked.items())
+                    return f"Blocked {tid} as needs_input; not linked: {why}{suffix}"
             if kind == "dependency" and where == "blocked" and not looped:
                 return f"Blocked {tid} as needs_input (no open parent to wait on){suffix}"
             if where == "triage" or (where == "blocked" and looped):
@@ -1005,8 +1016,21 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 return f"{tid} → blocked (unblock loop detected — parked until explicit unblock){suffix}"
             return f"Blocked {tid}{suffix}"
 
-        op = _commented(conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
-            conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid)))
+        block = _commented(conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
+            conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid), link_named=True))
+
+        def op(tid):
+            # Check before the BLOCKED comment lands: a cleared blocker is not a block.
+            if kind in kb._NAMED_CARD_KINDS:
+                open_ids, not_linked, done = kb.named_cards(conn, tid, reason)
+                if done and not open_ids and not not_linked:
+                    cleared[tid] = f"blocker cleared ({', '.join(done)} already done); keep working"
+                    return True
+            try:
+                return block(tid)
+            except kb.BlockerCleared as e:  # parent finished between the check and the block
+                cleared[tid] = str(e)
+                return True
         return _bulk_apply(ids, op, ok_msg, lambda tid: f"cannot block {tid}")
 
 
