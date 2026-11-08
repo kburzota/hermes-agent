@@ -834,11 +834,24 @@ def _handle_block(args: dict, **kw) -> str:
                f"{sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} (got {kind!r}). If the task is actually "
                f"finished or cannot proceed for another reason, call kanban_complete instead — "
                f"the completion judge will evaluate it.")
-        ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid))
+        try:
+            ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
+                               link_named=True)
+        except kb.BlockerCleared as e:
+            return _ok_landed(kb, conn, tid, "running", blocked=False, note=str(e))
         _check(ok, f"could not block {tid} (unknown id or not in running/ready)")
         landed_task = kb.get_task(conn, tid)
         landed_kind = landed_task.block_kind if landed_task else None
         extra: dict = {"block_kind": landed_kind}
+        block_event = next((e for e in reversed(kb.list_events(conn, tid))
+                            if e.kind in ("blocked", "dependency_wait", "block_loop_detected")), None)
+        block_payload = (block_event.payload if block_event else None) or {}
+        if block_payload.get("auto_linked_parents"):
+            extra["auto_linked"] = block_payload["auto_linked_parents"]
+        if block_payload.get("named_cards_not_linked"):
+            extra["named_cards_not_linked"] = block_payload["named_cards_not_linked"]
+            extra["note"] = ("named card(s) not linked, so this stays a human block: " + ", ".join(
+                f"{k} ({v})" for k, v in block_payload["named_cards_not_linked"].items()))
         if landed_task and landed_task.block_recurrences >= kb.BLOCK_RECURRENCE_LIMIT:
             extra["block_loop"] = True
             extra["note"] = (

@@ -187,7 +187,10 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "reason": _prop("string", (
                 "What you need answered or what stopped you, in one or "
                 "two sentences. Don't paste the whole conversation; the "
-                "human has the board and can ask follow-ups via comments."
+                "human has the board and can ask follow-ups via comments. "
+                "Waiting on another card? Put its id (t_xxxxxxxx) here: an open "
+                "card on this board is linked as a parent and you resume when it "
+                "finishes; a card that is already done means don't block."
         )),
         "kind": {
             "type": "string",
