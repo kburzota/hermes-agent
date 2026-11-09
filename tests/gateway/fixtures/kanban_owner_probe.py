@@ -122,6 +122,10 @@ def main():
     try:
         with daemon(root, home, env, barrier=False) as (_proc, desc):
             subprocess.Popen = spawn
+            # In production the owner gateway is the dispatcher; here this process dispatches on its
+            # behalf, so claim as the daemon (the restart wait counts only its own claims).
+            import socket
+            kb._claimer_id = lambda: f'{socket.gethostname()}:{_proc.pid}'
             try:
                 with closing(connect(board='owned')) as conn:
                     launched = dispatch.dispatch_once(conn, board='owned', max_spawn=1)
