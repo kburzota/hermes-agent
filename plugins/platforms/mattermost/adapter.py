@@ -498,6 +498,22 @@ class MattermostAdapter(BasePlatformAdapter):
         posts = (await self._api_get(f"posts/{root_id}/thread")).get("posts") or {}
         return any(p.get("user_id") == self._bot_user_id for p in posts.values())
 
+    async def _thread_root_context(self, root_id: Optional[str]) -> dict[str, Any]:
+        """Reply context for a thread reply: the root post's text, so a session that starts mid-thread
+        (e.g. the root was posted by this bot from another session) still sees what is being answered."""
+        if not root_id:
+            return {}
+        try:
+            root = (await self._api_get(f"posts/{root_id}")) or {}
+        except Exception as exc:  # context is best-effort; never block delivery
+            logger.warning("Mattermost: could not load thread root %s: %s", root_id, exc)
+            return {}
+        text = (root.get("message") or "").strip()
+        if not text:
+            return {}
+        return {"reply_to_message_id": root_id, "reply_to_text": text[:4000],
+                "reply_to_is_own_message": root.get("user_id") == self._bot_user_id}
+
     def _mentions_other(self, message_text: str) -> bool:
         """True if the text @mentions someone other than this bot (@here/@channel/@all don't count)."""
         ours = {self._bot_username.lower(), self._bot_user_id.lower(), "here", "channel", "all"}
@@ -580,7 +596,8 @@ class MattermostAdapter(BasePlatformAdapter):
                 self.config.extra, "thread_require_mention", "MATTERMOST_THREAD_REQUIRE_MENTION", "false",
                 blank_is_unset=False)).lower() in {"false", "0", "no"}
             # shortcut: one thread GET per unmentioned thread reply, no cache; add one if the call rate hurts.
-            in_thread = bool(thread_open) and self._bot_username.lower() not in message_text.lower() \
+            # Test for an actual "@bot" mention: the bare username in pasted/quoted text must not skip the thread check.
+            in_thread = bool(thread_open) and f"@{self._bot_username}".lower() not in message_text.lower() \
                 and await self._bot_in_thread(root_id)
             message_text = self._apply_channel_gating(channel_id, message_text, in_thread)
             if message_text is None:
@@ -591,6 +608,7 @@ class MattermostAdapter(BasePlatformAdapter):
             thread_id = post_id
         if message_text[:1].isspace() and message_text.lstrip().startswith("/"):
             message_text = message_text.lstrip()
+        reply_ctx = await self._thread_root_context(post.get("root_id"))
         media_urls, media_types = await self._download_attachments(post.get("file_ids") or [])
         if message_text.startswith("/"):
             msg_type = MessageType.COMMAND
@@ -606,7 +624,7 @@ class MattermostAdapter(BasePlatformAdapter):
         from gateway.platforms.base import resolve_channel_prompt
         await self.handle_message(MessageEvent(
             text=message_text, message_type=msg_type, source=source, raw_message=post, message_id=post_id,
-            media_urls=media_urls, media_types=media_types,
+            media_urls=media_urls, media_types=media_types, **reply_ctx,
             channel_prompt=resolve_channel_prompt(self.config.extra, channel_id, None)))
 
 
