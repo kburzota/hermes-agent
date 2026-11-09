@@ -1969,8 +1969,18 @@ def configured_max_in_progress() -> Optional[int]:
     return ival if ival >= 1 else None
 
 
-def count_running_tasks(conn: sqlite3.Connection) -> int:
-    """Number of tasks in ``status='running'``.
+# Titles that may use the slots reserved by ``kanban.review_reserved_slots``
+# (first-class review-lane cards use them too, by lane).
+REVIEW_TITLE_PREFIXES = ("pr-chain review:", "pr-chain merge:")
+_BUILDER_ONLY_SQL = " AND ".join(f"lower(title) NOT LIKE '{p}%'" for p in REVIEW_TITLE_PREFIXES)
+
+
+def is_review_title(title: Optional[str]) -> bool:
+    return (title or "").lower().startswith(REVIEW_TITLE_PREFIXES)
+
+
+def count_running_tasks(conn: sqlite3.Connection, builders_only: bool = False) -> int:
+    """Number of tasks in ``status='running'`` (``builders_only`` skips pr-chain review/merge cards).
 
     Used by the multi-board sweep to count OTHER boards' workers against the
     host-level budget — the memory-derived cap bounds the machine, not the
@@ -1980,13 +1990,14 @@ def count_running_tasks(conn: sqlite3.Connection) -> int:
         return int(
             conn.execute(
                 "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
+                + (f" AND {_BUILDER_ONLY_SQL}" if builders_only else "")
             ).fetchone()[0]
         )
     except Exception:
         return 0
 
 
-def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
+def count_running_tasks_other_boards(board: Optional[str] = None, builders_only: bool = False) -> int:
     """Total ``running`` tasks across every board EXCEPT ``board``.
 
     Caps bound the HOST, but each board's tick only sees its own DB; without
@@ -2014,7 +2025,7 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
                 continue
             other = _kbc.connect(board=slug)
             try:
-                total += count_running_tasks(other)
+                total += count_running_tasks(other, builders_only)
             finally:
                 with contextlib.suppress(Exception):
                     other.close()
@@ -2056,6 +2067,7 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    review_reserved_slots: int = 0,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -2079,6 +2091,7 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
+            review_reserved_slots=review_reserved_slots,
         )
 
     try:
@@ -2363,7 +2376,7 @@ def _tick_spawn_budget(
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order."""
     return conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, title FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -2433,6 +2446,7 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    review_reserved_slots: int = 0,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
@@ -2490,10 +2504,22 @@ def _dispatch_once_locked(
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
     )
     default_assignee = _resolve_default_assignee(default_assignee)
+    # Review reserve: builders fill at most cap - reserve slots; pr-chain
+    # review/merge cards (and the review lane below) may use the rest.
+    # shortcut: a running review-lane card is counted as a builder (no lane column), upgrade if that bites.
+    builder_budget: Optional[int] = None
+    if review_reserved_slots > 0 and max_in_progress is not None:
+        builders_running = count_running_tasks(conn, True) + count_running_tasks_other_boards(board, True)
+        builder_budget = max(max_in_progress - review_reserved_slots - builders_running, 0)
+        ready_rows = sorted(ready_rows, key=lambda r: not is_review_title(r["title"]))  # stable: review cards first
     spawned = 0
+    builders_spawned = 0
     for row in ready_rows:
         if ready_budget is not None and spawned >= ready_budget:
             break
+        is_builder = builder_budget is not None and not is_review_title(row["title"])
+        if is_builder and builders_spawned >= (builder_budget or 0):
+            continue
         row_assignee = row["assignee"]
         if not row_assignee:
             # Honour kanban.default_assignee so an unassigned task doesn't
@@ -2507,6 +2533,7 @@ def _dispatch_once_locked(
             result.auto_assigned_default.append(row["id"])
         if _dispatch_lane_task(conn, row, row_assignee, result, lane="ready", **lane_kwargs):
             spawned += 1
+            builders_spawned += is_builder
 
     # A review agent (sdlc-review) approves (→ done) or requests changes
     # (→ ready/todo). Review spawns share max_spawn with ready tasks. The loop

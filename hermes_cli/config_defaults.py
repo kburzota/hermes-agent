@@ -1938,6 +1938,10 @@ DEFAULT_CONFIG = {
         # global caps allow; blocked tasks defer to the next tick. None = no per-profile cap. Useful
         # when fan-out would saturate one profile's model/API quota/browser pool. See #21582.
         "max_in_progress_per_profile": None,
+        # Slots only review work may use: builders get at most max_in_progress - N. Review work is the
+        # review lane (kanban.review_dispatch) plus cards titled "pr-chain review:" / "pr-chain merge:".
+        # 0 = no reserve (default). Needs max_in_progress.
+        "review_reserved_slots": 0,
         # Per-home claim allowlist for boards shared across Hermes homes (#110995): profile names
         # this home's dispatcher may claim (list or comma-separated string). None = any existing
         # profile is claimable. Set = fail-closed (an empty list claims nothing). Every home has a

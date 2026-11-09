@@ -42,6 +42,7 @@ class _DispatcherSettings:
     reconcile_orphans: bool
     default_assignee: Optional[str]
     max_in_progress_per_profile: Optional[int]
+    review_reserved_slots: int = 0
 
 
 def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettings:
@@ -115,6 +116,7 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
         # Per-profile concurrency cap: no single profile's local model / API
         # quota / browser pool gets overwhelmed by a fan-out.
         max_in_progress_per_profile=_positive_int_setting(kanban_cfg, "max_in_progress_per_profile"),
+        review_reserved_slots=_positive_int_setting(kanban_cfg, "review_reserved_slots") or 0,
     )
 
 
@@ -257,6 +259,31 @@ class _KanbanDispatcher:
         if self._ready_probed_on_tick:
             return self._last_ready_nonempty
         return self._scan_ready_nonempty()
+
+    def capacity_snapshot(self) -> tuple[int, int, int]:
+        """``(running, builders_running, ready_waiting)`` summed over every board."""
+        kbd = _kbd()
+        running = builders = waiting = 0
+        from hermes_cli import kanban_db as _kb
+        with _kb.pin_first_board_resolution():
+            for slug in self._board_slugs():
+                conn = None
+                try:
+                    conn = _kbc().connect(board=slug)
+                    running += kbd.count_running_tasks(conn)
+                    builders += kbd.count_running_tasks(conn, True)
+                    waiting += conn.execute(
+                        "SELECT COUNT(*) FROM tasks WHERE status = 'ready' AND claim_lock IS NULL"
+                    ).fetchone()[0]
+                except Exception:
+                    continue
+                finally:
+                    if conn is not None:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+        return running, builders, waiting
 
     def _scan_ready_nonempty(self) -> bool:
         kbd = _kbd()

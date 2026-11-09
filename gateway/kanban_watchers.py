@@ -278,6 +278,7 @@ class GatewayKanbanWatchersMixin:
         # broken PATH, missing venv, or credential loss.
         bad_ticks = 0
         last_warn_at = 0
+        last_capacity_log_at = 0
         results: Optional[list] = None
         dispatcher = _KanbanDispatcher(_kb, settings)
 
@@ -311,7 +312,21 @@ class GatewayKanbanWatchersMixin:
                     ready_pending = dispatcher.ready_nonempty()
                     bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned else 0
                 now = int(time.time())
-                if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
+                cap, reserve = settings.max_in_progress, settings.review_reserved_slots
+                capacity_line = None
+                if bad_ticks >= _HEALTH_WINDOW and cap:
+                    running, builders, waiting = await _to_thread_process_service(dispatcher.capacity_snapshot)
+                    if running >= cap:
+                        capacity_line = f"at capacity {running}/{cap}; {waiting} ready waiting"
+                    elif reserve and builders >= cap - reserve:
+                        capacity_line = (f"builder slots full {builders}/{cap - reserve} "
+                                         f"({reserve} reserved for review); {waiting} ready waiting")
+                if capacity_line:
+                    # Capacity, not a spawn failure: INFO, at most every 30 min.
+                    if now - last_capacity_log_at >= 1800:
+                        logger.info("kanban dispatcher: %s", capacity_line)
+                        last_capacity_log_at = now
+                elif bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
                     held = _kbd.describe_suppression(res for _slug, res in (results or []))
                     logger.warning(
                         "kanban dispatcher stuck: ready queue non-empty for "
