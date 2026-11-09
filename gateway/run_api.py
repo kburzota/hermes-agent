@@ -315,7 +315,7 @@ class GatewayRuntimeAPI:
             # Kanban card: its worker polls this socket, and cutting it crashes a card that is running.
             # shortcut: any card on this authority keeps every pre-wait socket until stop(), not just its
             # worker's; narrow it if an idle client ever pins a wait.
-            card_held = bool(getattr(authority, "card_sessions", None)) and restart_wait_open(self.runner)
+            card_held = restart_wait_open(self.runner) and bool(getattr(authority, "live_card_sessions", dict)())
             if ((descriptor['state'] != 'ready' or self.runner._draining) and not allow_draining
                     and not card_held and not (admitted_in_wait and restart_wait_open(self.runner))):
                 return {'type': 'websocket.disconnect', 'code': 1013}

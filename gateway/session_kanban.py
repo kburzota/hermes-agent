@@ -88,7 +88,6 @@ async def run_task(connection, params):
     # task closes. Retry checks the saved claim, never reinterprets updated cards.
     request_id = 'kanban:' + json.dumps([params.get('board'), params.get('task_id'), params.get('run_id')], separators=(',', ':'))
     sid = local_identity(authority.profile_id, connection.actor.subject, request_id)
-    authority.card_sessions.add(sid)  # a restart's after-turn wait lets a claimed card finish
     saved = local_receipt(authority.db, sid) if authority.db.get_session(sid) is not None else None
     if saved:
         policy = restore_policy(saved['policy'])
@@ -131,6 +130,8 @@ async def run_task(connection, params):
                     run_id=task.current_run_id)
     from gateway.session_runtime_workers import tracked_write
     await tracked_write(authority, admit_claim)
+    # a restart's after-turn wait lets a claimed card finish; dropped once it stops running
+    authority.card_sessions[sid] = (context['db'], params['task_id'], params['run_id'])
     await connection.resume(ref, {})
     # Finite like the `chat -q` worker it replaced: nobody can answer an approval or clarify in a
     # card (approvals.single_query_mode applies). Never unattended: that is `-z`'s auto-approval.

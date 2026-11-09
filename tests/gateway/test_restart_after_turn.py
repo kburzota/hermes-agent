@@ -58,3 +58,22 @@ def test_load_restart_after_turn_timeout_preserves_zero(tmp_path, monkeypatch):
 
     monkeypatch.setenv("HERMES_RESTART_AFTER_TURN_TIMEOUT", "0")
     assert GatewayRunner._load_restart_after_turn_timeout() == 0.0
+
+
+def test_live_kanban_worker_count_only_counts_this_gateways_claims(monkeypatch):
+    import sqlite3
+    from hermes_cli import kanban_db as kb, kanban_db_connect as kbc, kanban_db_dispatch as kbd
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE tasks (status, worker_pid, worker_started_at, claim_lock)")
+    conn.executemany("INSERT INTO tasks VALUES ('running', 1, 'x', ?)",
+                     [("HOST:1",), ("HOST:2",), ("HOST:2",)])
+    class _Keep:  # the code under test closes its connection; keep ours open
+        execute = staticmethod(conn.execute)
+        close = staticmethod(lambda: None)
+
+    monkeypatch.setattr(kb, "list_boards", lambda include_archived=False: [{"slug": "default"}])
+    monkeypatch.setattr(kbc, "connect", lambda board=None: _Keep)
+    monkeypatch.setattr(kbd, "_worker_alive", lambda *_: True)
+    monkeypatch.setattr(kb, "_claimer_id", lambda: "HOST:1")
+    assert GatewayRunner._live_kanban_worker_count() == 1

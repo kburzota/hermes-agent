@@ -1546,7 +1546,8 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
 
     @staticmethod
     def _live_kanban_worker_count() -> int:
-        """Claimed Kanban cards whose worker process is alive, on every board. A worker spawned just
+        """Cards THIS process claimed (claim_lock host:pid) whose worker is alive, on every board:
+        other gateways' cards are not ours to wait for. A worker spawned just
         before the restart has no managed turn until its first owner call, so the wait would otherwise
         end under it and crash the card."""
         try:
@@ -1558,7 +1559,8 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
                 try:
                     count += sum(1 for r in conn.execute(
                         "SELECT worker_pid, worker_started_at FROM tasks "
-                        "WHERE status='running' AND worker_pid IS NOT NULL") if _worker_alive(*r))
+                        "WHERE status='running' AND worker_pid IS NOT NULL AND claim_lock=?",
+                        (kb._claimer_id(),)) if _worker_alive(*r))
                 finally:
                     conn.close()
             return count

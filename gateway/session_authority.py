@@ -126,7 +126,7 @@ class SessionAuthority:
         self.db = db
         self.epoch = epoch
         self.sessions = {}
-        self.card_sessions = set()  # claimed Kanban cards: they keep running through a restart's after-turn wait
+        self.card_sessions = {}  # sid -> (db, task_id, run_id); claimed Kanban cards: they keep running through a restart's after-turn wait
         self.waiters = {}
         self.events = {}
         self.native_waiters = set()
@@ -216,6 +216,21 @@ class SessionAuthority:
                 and source.user_id != actor.subject and 'session:operator' not in actor.capabilities):
             raise RuntimeStoreError('permission_denied')
 
+    def live_card_sessions(self):
+        """card_sessions minus cards no longer running under that attempt (finished or reclaimed)."""
+        from pathlib import Path
+        from hermes_cli.kanban_db_connect import connect_closing
+        from hermes_cli import kanban_db as kb
+        for sid, (db, task_id, run_id) in list(self.card_sessions.items()):
+            try:
+                with connect_closing(Path(db)) as conn:
+                    task = kb.get_task(conn, task_id)
+                if not (task and task.status == 'running' and task.current_run_id == run_id):
+                    self.card_sessions.pop(sid, None)
+            except Exception:
+                pass  # unreadable: keep it; the wait is bounded by its own timeout
+        return self.card_sessions
+
     def _require_admission_open(self, *, queue_only=False, session_id=None):
         """``queue_only``: the caller only COMMITS a queued row (never claims or runs it). A restart's
         after-turn wait accepts those (#139041): the row is durable FIFO input the next owner runs
@@ -225,7 +240,7 @@ class SessionAuthority:
             raise RuntimeStoreError('runtime_draining')
         if self.runner._draining:
             from gateway.drain_control import restart_wait_open
-            if not ((queue_only or session_id in self.card_sessions) and restart_wait_open(self.runner)):
+            if not ((queue_only or session_id in self.live_card_sessions()) and restart_wait_open(self.runner)):
                 raise RuntimeStoreError('runtime_draining')
 
     def _admission_gate(self, authorize=None, *, queue_only=False, session_id=None):
@@ -1103,7 +1118,7 @@ class SessionAuthority:
         """A drain about to wait (storage retry, classic slot) exits instead when the runtime drains,
         the profile retires or the live entry was replaced; committed rows stay queued."""
         from gateway.drain_control import restart_wait_open
-        draining = self.runner._draining and not (ref.session_id in self.card_sessions and restart_wait_open(self.runner))
+        draining = self.runner._draining and not (ref.session_id in self.live_card_sessions() and restart_wait_open(self.runner))
         if draining or self.retiring or self.sessions.get(ref.session_id) is not live:
             self._pause(ref, 'runtime_draining')
             return True
