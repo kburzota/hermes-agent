@@ -126,7 +126,7 @@ class SessionAuthority:
         self.db = db
         self.epoch = epoch
         self.sessions = {}
-        self.card_sessions = {}  # sid -> (db, task_id, run_id); claimed Kanban cards: they keep running through a restart's after-turn wait
+        self.card_sessions = {}  # sid -> (board, task_id, run_id, claim_lock); claimed Kanban cards: they keep running through a restart's after-turn wait
         self.waiters = {}
         self.events = {}
         self.native_waiters = set()
@@ -221,11 +221,12 @@ class SessionAuthority:
         from pathlib import Path
         from hermes_cli.kanban_db_connect import connect_closing
         from hermes_cli import kanban_db as kb
-        for sid, (db, task_id, run_id) in list(self.card_sessions.items()):
+        for sid, (board, task_id, run_id, claim_lock) in list(self.card_sessions.items()):
             try:
-                with connect_closing(Path(db)) as conn:
+                with connect_closing(Path(kb.kanban_db_path(board=board))) as conn:
                     task = kb.get_task(conn, task_id)
-                if not (task and task.status == 'running' and task.current_run_id == run_id):
+                if not (task and task.status == 'running' and task.current_run_id == run_id
+                        and task.claim_lock == claim_lock):
                     self.card_sessions.pop(sid, None)
             except Exception:
                 pass  # unreadable: keep it; the wait is bounded by its own timeout
