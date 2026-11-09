@@ -50,14 +50,14 @@ def verify_worker_identity(process, hello):
     return pid, birth
 
 
-def reserve_admission_worker(authority, *, admission_id, process, principal_id, hello):
+def reserve_admission_worker(authority, *, admission_id, process, principal_id, hello, session_id=None):
     """Return a private bootstrap scope; never accept caller-selected kind/target.
 
     Only the owner process may reserve its live direct exec child. The admission
     supplies physical session and generation; its durable principal must match
     the producer. Do not publish the returned secret on any client event stream.
     """
-    authority._require_admission_open()
+    authority._require_admission_open(session_id=session_id)
     pid, birth = verify_worker_identity(process, hello)
     secret = secrets.token_urlsafe(32)
 

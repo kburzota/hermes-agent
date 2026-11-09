@@ -77,7 +77,7 @@ async def worker_request(connection, ref, params, *, operation):
     claim = _claim(connection, ref, params)
     authority = connection.authority
     if operation == 'register':
-        authority._require_admission_open()
+        authority._require_admission_open(session_id=params['session_id'])
     scope = {key: params[key] for key in ('execution_id', 'session_id', 'generation')}
     if operation == 'register':
         # Only a worker-adoption ticket (what a launched worker carries): an interactive client

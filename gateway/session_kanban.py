@@ -88,6 +88,9 @@ async def run_task(connection, params):
     # task closes. Retry checks the saved claim, never reinterprets updated cards.
     request_id = 'kanban:' + json.dumps([params.get('board'), params.get('task_id'), params.get('run_id')], separators=(',', ':'))
     sid = local_identity(authority.profile_id, connection.actor.subject, request_id)
+    # A restart's after-turn wait lets a claimed card finish. Registered before the admission gates
+    # (they run inside the wait); live_card_sessions drops it unless the claim is the running one.
+    authority.card_sessions[sid] = (params.get('board'), params.get('task_id'), params.get('run_id'), params.get('claim_lock'))
     saved = local_receipt(authority.db, sid) if authority.db.get_session(sid) is not None else None
     if saved:
         policy = restore_policy(saved['policy'])

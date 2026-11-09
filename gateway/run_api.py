@@ -304,15 +304,20 @@ class GatewayRuntimeAPI:
         original_receive = receive
         allow_draining = False
         admitted_in_wait = False
+        authority = None
         from gateway.drain_control import restart_wait_open
 
         async def receive_admitted():
             message = await original_receive()
             # Only a socket admitted INTO the restart wait (to answer a parked prompt) outlives it. One
             # opened before the wait is cut as before: its client reconnects to the next owner, and a
-            # held one (a kanban worker polling its card) would otherwise pin the drain to its cap.
+            # held one would otherwise pin the drain to its cap. Except while this owner holds a claimed
+            # Kanban card: its worker polls this socket, and cutting it crashes a card that is running.
+            # shortcut: any card on this authority keeps every pre-wait socket until stop(), not just its
+            # worker's; narrow it if an idle client ever pins a wait.
+            card_held = restart_wait_open(self.runner) and bool(getattr(authority, "live_card_sessions", dict)())
             if ((descriptor['state'] != 'ready' or self.runner._draining) and not allow_draining
-                    and not (admitted_in_wait and restart_wait_open(self.runner))):
+                    and not card_held and not (admitted_in_wait and restart_wait_open(self.runner))):
                 return {'type': 'websocket.disconnect', 'code': 1013}
             return message
 
