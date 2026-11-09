@@ -1544,6 +1544,27 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             and (idle := _idle_seconds(agent)) is not None and idle >= timeout
         )
 
+    @staticmethod
+    def _live_kanban_worker_count() -> int:
+        """Claimed Kanban cards whose worker process is alive, on every board. A worker spawned just
+        before the restart has no managed turn until its first owner call, so the wait would otherwise
+        end under it and crash the card."""
+        try:
+            from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
+            from hermes_cli.kanban_db_dispatch import _worker_alive
+            count = 0
+            for board in kb.list_boards(include_archived=False):
+                conn = kbc.connect(board=board["slug"])
+                try:
+                    count += sum(1 for r in conn.execute(
+                        "SELECT worker_pid, worker_started_at FROM tasks "
+                        "WHERE status='running' AND worker_pid IS NOT NULL") if _worker_alive(*r))
+                finally:
+                    conn.close()
+            return count
+        except Exception:
+            return 0
+
     def _awaitable_work_count(self) -> int:
         """Active work minus the units the restart wait must not hold for.
 
@@ -1559,6 +1580,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             + managed_turn_count(self)
             + self._active_api_run_count()
             + self._active_deferred_agent_worker_count()
+            + self._live_kanban_worker_count()
         )
         return (
             max(0, non_cron - self._wedged_chat_agent_count())

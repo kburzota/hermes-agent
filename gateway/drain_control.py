@@ -70,6 +70,9 @@ RESTART_WAIT_WS_METHODS = frozenset({
     "ping", "runtime.describe", "session.resume", "session.detach", "session.events.since",
     "session.info", "session.list", "prompt.submit", "prompt.receipt", "session.interrupt",
     "approval.pending", "approval.received", "approval.respond", "clarify.respond", "clarify.lock",
+    # A card the dispatcher claimed before the drain is admitted and run to completion (its worker
+    # has no next owner to retry against); the dispatcher itself stops claiming once draining.
+    "kanban.run",
 })
 
 

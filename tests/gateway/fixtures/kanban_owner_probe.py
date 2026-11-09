@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 
-from local_recovery_probe import daemon, websocket, rpc
+from local_recovery_probe import control, daemon, websocket, rpc
 
 
 class Model(BaseHTTPRequestHandler):
@@ -93,8 +93,11 @@ def main():
     with closing(connect(board='owned')) as conn:
         tid = kb.create_task(conn, title='KANBAN_TASK_SENTINEL', body='Acceptance: finish owned card', assignee='default',
             workspace_kind='dir', workspace_path=str(workspace), skills=['owned-skill'],
-            goal_mode=peer.mode == 'complete', goal_max_turns=2,
+            goal_mode=peer.mode in {'complete', 'restart'}, goal_max_turns=2,
             max_runtime_seconds=3600 if peer.mode == 'timeout' else None)
+        if peer.mode == 'restart':  # the card a dispatcher tick claims after the restart request
+            tid2 = kb.create_task(conn, title='SECOND_CARD', body='Acceptance: finish', assignee='default',
+                workspace_kind='dir', workspace_path=str(workspace), goal_mode=True, goal_max_turns=2, priority=-1)
     env = dict(os.environ)
     receipt, clients = {}, []
     original_popen = subprocess.Popen
@@ -128,6 +131,16 @@ def main():
                     assert peer.blocked.wait(55), 'model never reached'
                     active = kb.get_task(conn, tid)
                     receipt.update(client_pid=clients[0].pid, stored_pid=active.worker_pid, run_id=task.current_run_id)
+                    if peer.mode == 'restart':
+                        # Graceful restart while card 1 runs, then a dispatcher tick that claimed card 2 a
+                        # moment before the drain: the owner defers stop() and both cards finish cleanly.
+                        import signal
+                        os.kill(_proc.pid, signal.SIGUSR1)
+                        wait_for(lambda: control(home, 'identify').get('state') == 'draining')
+                        late = dispatch.dispatch_once(conn, board='owned', max_spawn=2)  # a cap, not a budget
+                        assert [s[0] for s in late.spawned] == [tid2], late
+                        wait_for(lambda: len(clients) == 2 and conn.execute(
+                            "SELECT 1 FROM task_events WHERE task_id=? AND kind='owner_admitted'", (tid2,)).fetchone())
                     if peer.mode == 'timeout':
                         # The spawned worker stays the run's handle; the owner's interpreter dies with it.
                         receipt['pid_preserved'] = active.worker_pid == clients[0].pid != receipt['managed_pid']
@@ -144,6 +157,14 @@ def main():
                         # Windows has no SIGKILL; os.kill there is TerminateProcess for any signal.
                         os.kill(active.worker_pid, getattr(signal, 'SIGKILL', signal.SIGTERM))
                     peer.release.set()
+                    if peer.mode == 'restart':
+                        wait_for(lambda: all(c.poll() is not None for c in clients))
+                        with closing(connect(board='owned')) as conn:
+                            receipt['restart_cards'] = {t: kb.get_task(conn, t).status for t in (tid, tid2)}
+                        receipt['client_codes'] = [c.returncode for c in clients]
+                        assert set(receipt['restart_cards'].values()) == {'done'} and receipt['client_codes'] == [0, 0], receipt
+                        wait_for(lambda: _proc.poll() is not None)  # stop() ran only after the cards finished
+                        return
                     if peer.mode != 'timeout':
                         wait_for(lambda: not kb._pid_alive(active.worker_pid))
                     wait_for(lambda: not kb._pid_alive(clients[0].pid))

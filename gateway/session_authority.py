@@ -126,6 +126,7 @@ class SessionAuthority:
         self.db = db
         self.epoch = epoch
         self.sessions = {}
+        self.card_sessions = set()  # claimed Kanban cards: they keep running through a restart's after-turn wait
         self.waiters = {}
         self.events = {}
         self.native_waiters = set()
@@ -215,22 +216,23 @@ class SessionAuthority:
                 and source.user_id != actor.subject and 'session:operator' not in actor.capabilities):
             raise RuntimeStoreError('permission_denied')
 
-    def _require_admission_open(self, *, queue_only=False):
+    def _require_admission_open(self, *, queue_only=False, session_id=None):
         """``queue_only``: the caller only COMMITS a queued row (never claims or runs it). A restart's
         after-turn wait accepts those (#139041): the row is durable FIFO input the next owner runs
-        exactly once, while this owner's claim path stays refused."""
+        exactly once, while this owner's claim path stays refused. ``session_id``: a claimed Kanban
+        card's session, which the wait lets run to completion (its worker has no next owner to retry)."""
         if self.retiring:
             raise RuntimeStoreError('runtime_draining')
         if self.runner._draining:
             from gateway.drain_control import restart_wait_open
-            if not (queue_only and restart_wait_open(self.runner)):
+            if not ((queue_only or session_id in self.card_sessions) and restart_wait_open(self.runner)):
                 raise RuntimeStoreError('runtime_draining')
 
-    def _admission_gate(self, authorize=None, *, queue_only=False):
+    def _admission_gate(self, authorize=None, *, queue_only=False, session_id=None):
         """The admission gate re-checked inside an off-loop write transaction (with the caller's
         own guard), so a drain that began while the write waited on the writer still refuses it."""
         def guard(conn):
-            self._require_admission_open(queue_only=queue_only)
+            self._require_admission_open(queue_only=queue_only, session_id=session_id)
             if authorize is not None:
                 authorize(conn)
         return guard
@@ -623,7 +625,7 @@ class SessionAuthority:
                         from gateway.session_operator import check_local_input
                         check_local_input(
                             self, SessionRef(self.profile_id, sid), row, source=source)
-                self._require_admission_open()
+                self._require_admission_open(session_id=sid)
                 self.sessions.setdefault(sid, LiveSession(source, route))
                 if any(row['status'] == 'unknown' for row in rows):
                     raise RuntimeStoreError('unknown_execution')
@@ -655,7 +657,7 @@ class SessionAuthority:
 
     async def _submit(self, actor, request, *, _authorize_write=None, queue_only=False, _replay_guard=None,
                       _kanban_card=None):
-        self._require_admission_open(queue_only=queue_only)
+        self._require_admission_open(queue_only=queue_only, session_id=request.ref.session_id)
         if (request.intent != 'queue' or not {'text'} <= set(request.payload) <= {
                 'text', 'attachments', 'finite', 'unattended', 'surface', 'voice_context', 'interrupted',
                 'voice_turn', 'display_kind', 'title_preview', 'turn_author', 'api_text', 'model_override', 'clarify_batch'}
@@ -692,7 +694,8 @@ class SessionAuthority:
                 return admit_session_input(self.db, epoch=self.epoch, principal_id=actor.subject,
                                            session_id=request.ref.session_id, request_id=request.request_id,
                                            payload=payload, intent=request.intent, _replay_guard=_replay_guard,
-                                           _authorize_write=self._admission_gate(_authorize_write, queue_only=queue_only))
+                                           _authorize_write=self._admission_gate(_authorize_write, queue_only=queue_only,
+                                                                                  session_id=request.ref.session_id))
             except Exception:
                 self._release_refused_capture(request, payload)
                 raise
@@ -1068,13 +1071,13 @@ class SessionAuthority:
                 # a claim now would hand this row to its busy path and settle it unrun. The head
                 # waits queued, as main's pending slot did; /stop and /new still cancel it.
                 return 'classic_busy', first
-            self._require_admission_open()
+            self._require_admission_open(session_id=ref.session_id)
             from gateway.session_runtime_workers import tracked_write
             live.rescan = False  # a _schedule from here on may not be visible to this claim's read
             # The row these checks validated, never whichever is first when the write runs: a
             # cancellation commits from a worker thread and can advance the FIFO at any point.
             row = await tracked_write(self, partial(claim_session_input, self.db, epoch=self.epoch,
-                                                    session_id=ref.session_id, _guard=self._admission_gate(),
+                                                    session_id=ref.session_id, _guard=self._admission_gate(session_id=ref.session_id),
                                                     head=first['admission_id'] if first is not None else None),
                                       then=partial(self._stamp_claim, ref, live))
             # Input scheduled while this claim's transaction ran may postdate its read: re-read
@@ -1099,7 +1102,9 @@ class SessionAuthority:
     def _drain_stopping(self, ref, live):
         """A drain about to wait (storage retry, classic slot) exits instead when the runtime drains,
         the profile retires or the live entry was replaced; committed rows stay queued."""
-        if self.runner._draining or self.retiring or self.sessions.get(ref.session_id) is not live:
+        from gateway.drain_control import restart_wait_open
+        draining = self.runner._draining and not (ref.session_id in self.card_sessions and restart_wait_open(self.runner))
+        if draining or self.retiring or self.sessions.get(ref.session_id) is not live:
             self._pause(ref, 'runtime_draining')
             return True
         return False

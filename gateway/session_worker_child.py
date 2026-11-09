@@ -84,7 +84,7 @@ async def worker_child_request(connection, ref, params):
     def reserve():
         refused, limits = None, (0, 0)
         try:
-            authority._require_admission_open()
+            authority._require_admission_open(session_id=params['session_id'])
             limits = delegation_limits(authority, params['execution_id'], params['session_id'])
         except RuntimeStoreError as exc:
             refused = exc.reason

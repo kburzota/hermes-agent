@@ -627,7 +627,8 @@ async def execute_managed(authority, ref, row, policy):
         # psutil + BEGIN IMMEDIATE: off-loop and retirement-tracked, like admission and claim.
         from gateway.session_runtime_workers import tracked_write
         scope = await tracked_write(authority, partial(reserve_admission_worker, authority,
-                    admission_id=row['admission_id'], process=process, principal_id=row['principal_id'], hello=hello))
+                    admission_id=row['admission_id'], process=process, principal_id=row['principal_id'], hello=hello,
+                    session_id=ref.session_id))
         worker.worker = (scope['pid'], scope['birth'])
         # The child reads nothing else until the exact reservation has committed.
         frame = await asyncio.to_thread(_bootstrap, authority, ref, row, policy, scope, text)
