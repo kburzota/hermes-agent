@@ -315,3 +315,15 @@ def test_an_earlier_runs_live_pid_does_not_hide_the_current_dead_run(board):
     board.event("t_ghost", run - 1, "spawned", {"pid": os.getpid()}, NOW - 100_000)
     board.conn.commit()
     assert [d.kind for d in board.diagnostics("t_ghost") if d.kind == "stale_running"] == ["stale_running"]
+
+
+def test_a_live_owner_that_never_wrote_the_admission_no_longer_holds_the_slot(board):
+    """bob/dinesh's standalone gateway stayed alive but raised after owner_admitted: 10.6 h running, no worker."""
+    live_owner = dict(owner_pid=os.getpid(), owner_birth=process_birth(psutil.Process()))
+    board.dead_attempt("t_stranded", admission=None, **live_owner)
+    board.dead_attempt("t_queued", admission=("queued", None), **live_owner)  # may still run: pause holds
+    assert owner_attempt_provably_over(board.conn, "t_stranded") is True
+    assert owner_attempt_provably_over(board.conn, "t_queued") is False
+    assert kb.release_stale_claims(board.conn) == 1
+    assert board.state("t_stranded")["status"] == "ready"
+    assert board.state("t_queued")["status"] == "running"
