@@ -91,6 +91,21 @@ def _owner_process_gone(receipt) -> bool:
     return birth is not None and current != birth
 
 
+def _admission_never_written(receipt) -> bool:
+    """True when the owner's own ledger has no admission row for this receipt.
+
+    The owner stamped ``owner_admitted`` but never committed the submission (it raised between the
+    two, e.g. a gateway running older in-memory code than the checkout), so no effect can be in
+    flight however alive that owner is. An unreadable ledger is never proof.
+    """
+    try:
+        with closing(sqlite3.connect(Path(receipt['db']).as_uri() + '?mode=ro', uri=True)) as owner:
+            return owner.execute('SELECT 1 FROM session_admissions WHERE target_session_id=? AND request_id=?',
+                                 (receipt['session_id'], receipt['request_id'])).fetchone() is None
+    except (OSError, ValueError, KeyError, sqlite3.Error):
+        return False
+
+
 def _run_worker_pids(conn, task_row, task_id):
     """Every worker pid recorded for the task's current run, with its spawn fingerprint."""
     recorded = [(task_row['worker_pid'], task_row['worker_started_at'])]
@@ -113,7 +128,8 @@ def owner_attempt_provably_over(conn, task_id) -> bool:
 
       * the claim is host-local and EXPIRED (a live claim is the owner still working);
       * no heartbeat inside ``DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS``;
-      * the receipt's own process is gone or recycled;
+      * the receipt's own process is gone or recycled, or its ledger holds no admission row at all
+        (a live owner that never submitted: it raised after ``owner_admitted``);
       * every worker pid recorded for the run (``tasks.worker_pid``, its ``spawned`` and
         ``worker_bound`` events) is dead or recycled.
 
@@ -137,7 +153,8 @@ def owner_attempt_provably_over(conn, task_id) -> bool:
     heartbeat = kb._to_epoch(row['last_heartbeat_at'])
     if heartbeat is not None and now - heartbeat <= kb.DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS:
         return False
-    if not _owner_process_gone(_latest_run_event(conn, task_id, 'owner_admitted')):
+    receipt = _latest_run_event(conn, task_id, 'owner_admitted')
+    if not (_owner_process_gone(receipt) or _admission_never_written(receipt)):
         return False
     pids = _run_worker_pids(conn, row, task_id)
     if not pids:
