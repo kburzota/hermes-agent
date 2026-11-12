@@ -16,21 +16,37 @@ def _rekeyed(doc, new):
     return doc
 
 
+class HostNamespaceDue(Exception):
+    """*receipt* is in the host gateway's namespace and ``adopt_host_namespace`` would rename it."""
+
+    def __init__(self, receipt, route):
+        super().__init__('host namespace heal due')
+        self.receipt, self.route = receipt, route
+
+
+def host_namespace_due(receipt, route):
+    """Whether *receipt* is exactly the host-gateway key for *route*. Read-only: the rename writes."""
+    name = Path(receipt['profile_id']).name
+    old = route.replace('agent:main:', f'agent:{name}:', 1)
+    return (receipt['route'] == old and old != route
+            and receipt['entry']['origin'].get('profile') == name)
+
+
 def adopt_host_namespace(authority, sid, receipt, route):
     """Rewrite *receipt* from ``agent:<own profile>:`` to *route* (``agent:main:``) and return it.
 
     A profile first served by the host gateway keys its local sessions ``agent:<name>:...``; once it
     runs its own gateway (its launch profile) the same DM is ``agent:main:...`` and every restore
     refused with ``route mismatch`` (``storage_unavailable``). Only that exact rename is accepted:
-    same home, same profile in the origin, same remainder of the key. The receipt, every sessions row of its lineage
+    same home, same profile in the origin, same remainder of the key. It takes the writer lock, so it
+    never runs on the owner loop (``session_local_adoption``). The receipt, every sessions row of its lineage
     (a compressed or reset chat has several) and the routing entry move in one owner transaction, or
     none do; nothing else changes. ``delivery_obligations`` and topic bindings are left alone: local
     sessions never write them (they belong to platform deliveries).
     """
     name = Path(receipt['profile_id']).name
     old = route.replace('agent:main:', f'agent:{name}:', 1)
-    if (receipt['route'] != old or old == route
-            or receipt['entry']['origin'].get('profile') != name):
+    if not host_namespace_due(receipt, route):
         return receipt
     new_receipt = {**receipt, 'route': route, 'entry': _rekeyed(receipt['entry'], route)}
     key = POLICY_PREFIX + sid
@@ -39,6 +55,8 @@ def adopt_host_namespace(authority, sid, receipt, route):
     def write(conn):
         _epoch(conn, authority.epoch)
         stored = conn.execute('SELECT value FROM state_meta WHERE key=?', (key,)).fetchone()
+        if stored is not None and json.loads(stored[0]).get('route') == route:
+            return  # a concurrent heal already committed it
         if stored is None or json.loads(stored[0]).get('route') != old:
             raise RuntimeStoreError('storage_unavailable')
         rows = [conn.execute('SELECT origin_json FROM sessions WHERE id=? AND session_key=?', (s, old)).fetchone()

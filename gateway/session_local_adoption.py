@@ -24,19 +24,36 @@ def on_owner_loop():
 
 
 def _due(authority, sid):
-    """*sid*'s stored receipt when a catch-up would commit for it on this owner, else None. Read-only."""
+    """Whether a catch-up (host-namespace rename or compression) would commit for *sid* here. Read-only."""
+    from gateway.session_local_namespace import HostNamespaceDue
     from gateway.session_local_recovery import owned_receipt
     from hermes_state_local_lineage import adoptable_compression
     try:
         receipt = owned_receipt(authority, sid)[0]
         with authority.db._read_ctx() as conn:
-            return receipt if adoptable_compression(conn, receipt) is not None else None
+            return adoptable_compression(conn, receipt) is not None
+    except HostNamespaceDue:
+        return True
     except (KeyError, TypeError, ValueError, AttributeError):
-        return None  # the restore refuses this receipt and logs the check that failed
+        return False  # the restore refuses this receipt and logs the check that failed
 
 
-def _adopt(authority, sid, receipt):
-    from hermes_state_local_lineage import adopt_untracked_compression
+def _adopt(authority, sid):
+    """The catch-up's writes, in order: the host-namespace rename, then compression steps. Worker only."""
+    from gateway.session_local_namespace import HostNamespaceDue, adopt_host_namespace
+    from gateway.session_local_recovery import owned_receipt
+    from hermes_state_local_lineage import adopt_untracked_compression, adoptable_compression
+    try:
+        try:
+            receipt = owned_receipt(authority, sid)[0]
+        except HostNamespaceDue as due:
+            adopt_host_namespace(authority, sid, due.receipt, due.route)
+            receipt = owned_receipt(authority, sid)[0]
+        with authority.db._read_ctx() as conn:
+            if adoptable_compression(conn, receipt) is None:
+                return
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return  # the restore refuses this receipt and logs the check that failed
     adopt_untracked_compression(authority.db, epoch=authority.epoch, session_id=sid, expected=receipt)
 
 
@@ -44,10 +61,9 @@ async def adopt_before_restore(authority, sid, *, tracked=True):
     """Commit *sid*'s due catch-up in a worker, so the restore that follows only reads.
 
     ``tracked=False``: an authority still being built, not yet published for retirement to join."""
-    receipt = _due(authority, sid)
-    if receipt is None:
+    if not _due(authority, sid):
         return
-    write = partial(_adopt, authority, sid, receipt)
+    write = partial(_adopt, authority, sid)
     try:
         if tracked:
             from gateway.session_runtime_workers import tracked_write
@@ -65,8 +81,8 @@ async def adopt_local_compressions(authority):
         await adopt_before_restore(authority, sid, tracked=False)
 
 
-def schedule_adoption(authority, sid, receipt):
-    """A sync restore on the owner loop found *receipt*'s catch-up due: commit it in a tracked worker,
+def schedule_adoption(authority, sid):
+    """A sync restore on the owner loop found *sid*'s catch-up due: commit it in a tracked worker,
     then publish the session on the loop. One worker per session at a time."""
     from gateway.session_runtime_workers import track_mutation
     pending = getattr(authority, '_local_adoptions', None)
@@ -78,7 +94,7 @@ def schedule_adoption(authority, sid, receipt):
 
     async def adopt_then_publish():
         try:
-            await asyncio.to_thread(_adopt, authority, sid, receipt)
+            await asyncio.to_thread(_adopt, authority, sid)
             if not getattr(authority, 'retiring', False):
                 from gateway.session_local_recovery import restore_local_session
                 restore_local_session(authority, sid)

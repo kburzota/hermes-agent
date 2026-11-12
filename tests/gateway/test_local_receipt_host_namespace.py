@@ -1,4 +1,5 @@
 """A profile moved from the host gateway to its own gateway keeps its local sessions."""
+import asyncio
 import json
 from pathlib import Path
 
@@ -48,7 +49,7 @@ def _age(db, sid, name, origin_profile):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('variant', ['own', 'foreign', 'compressed', 'taken'])
+@pytest.mark.parametrize('variant', ['own', 'foreign', 'compressed', 'taken', 'on_loop'])
 async def test_launch_profile_adopts_its_host_namespace_receipt(tmp_path, monkeypatch, variant):
     from gateway import run
     from gateway.run import _profile_runtime_scope
@@ -87,10 +88,17 @@ async def test_launch_profile_adopts_its_host_namespace_receipt(tmp_path, monkey
             authority.db._execute_write(squat)
         if variant in ('foreign', 'taken'):
             with pytest.raises(RuntimeStoreError):
-                restore_local_session(authority, ref.session_id)
+                await asyncio.to_thread(restore_local_session, authority, ref.session_id)
             assert local_receipt(authority.db, ref.session_id)['route'] == old
             return
-        assert restore_local_session(authority, ref.session_id) == ref
+        if variant == 'on_loop':  # the boot path: the worker commits the rename, the loop restore only reads
+            from gateway.session_local_adoption import adopt_before_restore
+            from gateway.session_local_namespace import HostNamespaceDue
+            from gateway.session_local_recovery import owned_receipt
+            with pytest.raises(HostNamespaceDue):  # owned_receipt never writes
+                owned_receipt(authority, ref.session_id)
+            await adopt_before_restore(authority, ref.session_id, tracked=False)
+        assert await asyncio.to_thread(restore_local_session, authority, ref.session_id) == ref
         receipt = local_receipt(authority.db, ref.session_id)
         assert receipt['route'] == receipt['entry']['session_key'] == current
         assert 'profile' not in receipt['entry']['origin']
@@ -102,7 +110,7 @@ async def test_launch_profile_adopts_its_host_namespace_receipt(tmp_path, monkey
             with authority.db._read_ctx() as conn:
                 tip_row = conn.execute('SELECT session_key, origin_json FROM sessions WHERE id=?', (tip,)).fetchone()
             assert tip_row[0] == current and old not in tip_row[1]
-        assert restore_local_session(authority, ref.session_id) == ref  # idempotent once healed
+        assert await asyncio.to_thread(restore_local_session, authority, ref.session_id) == ref  # idempotent once healed
     finally:
         for owner in getattr(runner, 'session_authorities', ()):
             owner.db.close()
