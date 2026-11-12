@@ -100,17 +100,22 @@ class LocalSessionAdapter(BasePlatformAdapter):
             return 'Clarification is unavailable in hosted rooms'
         if is_forward_policy(policy):
             return 'Clarification is unavailable to a forwarded peer'
+        return self.no_viewer_can_answer(chat_id)
+
+    def no_viewer_can_answer(self, chat_id, capability='session:respond'):
+        """Why a prompt in this chat has no responder, else None. Clarify is answered with
+        ``session:respond``, approvals with ``session:approve``."""
         live = self.authority.sessions.get(chat_id)
         if live is None:
             return None
         with live.event_stream.lock:
-            if any('session:respond' in member.capabilities for member in live.subscribers.values()):
+            if any(capability in member.capabilities for member in live.subscribers.values()):
                 return None
         from hermes_state_runtime import list_session_admissions
         started = next((row for row in list_session_admissions(self.authority.db, session_id=chat_id)
                         if row['status'] == 'started'), None)
         if started is not None and 'local_automation_v1' in started['payload']:
-            return 'Clarification is unavailable: no viewer can answer this chat'
+            return 'No viewer can answer this prompt'
         return None
 
 

@@ -675,6 +675,13 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         return response, answered
 
     def _approval_notify_sync(self, approval_data: dict) -> None:
+        if self._ctx.source.platform == Platform.LOCAL and self._approval_owner is not None:
+            # Same key as clarify: a producer turn (Bot Chat, injection) with no responder fails fast;
+            # a viewer's own turn keeps waiting so its author can re-attach and approve.
+            adapter = self._runner._adapters_for_profile(self._ctx.source.profile).get(Platform.LOCAL)
+            why = getattr(adapter, "no_viewer_can_answer", lambda _id, _cap: None)(self._approval_owner[1], "session:approve")
+            if why:
+                raise _ExecApprovalDeclined(why)
         if self._approval_owner is not None:
             authority, session_id, generation = self._approval_owner
             authority.check_approval_generation(session_id, generation)
