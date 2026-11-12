@@ -100,6 +100,10 @@ class LocalSessionAdapter(BasePlatformAdapter):
             return 'Clarification is unavailable in hosted rooms'
         if is_forward_policy(policy):
             return 'Clarification is unavailable to a forwarded peer'
+        return self.no_viewer_can_answer(chat_id)
+
+    def no_viewer_can_answer(self, chat_id):
+        """Why a prompt (clarify or approval) in this chat has no responder, else None."""
         live = self.authority.sessions.get(chat_id)
         if live is None:
             return None
