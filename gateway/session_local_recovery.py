@@ -73,7 +73,7 @@ def _with_untracked_compression(authority, sid, receipt):
             return receipt
     from gateway.session_local_adoption import on_owner_loop, schedule_adoption
     if on_owner_loop():
-        schedule_adoption(authority, sid, receipt)
+        schedule_adoption(authority, sid)
         raise _CatchUpPending('storage_unavailable')
     adopt_untracked_compression(authority.db, epoch=authority.epoch, session_id=sid, expected=receipt)
     return local_receipt(authority.db, sid)
@@ -109,7 +109,28 @@ def owned_receipt(authority, sid):
         raise ValueError('identity mismatch')
     source = local_source(authority, chat_id, receipt['principal_id'])
     route = authority.runner.session_store._generate_session_key(source)
+    if source.profile is None:  # the launch profile; a served secondary keeps its own namespace
+        from gateway.session_local_namespace import HostNamespaceDue, host_namespace_due
+        if host_namespace_due(receipt, route):  # the rename writes: the caller commits it off the loop
+            raise HostNamespaceDue(receipt, route)
     return receipt, source, route, _checked_entry(authority, receipt, source, route)
+
+
+def healed_receipt(authority, sid):
+    """``owned_receipt`` once a host-namespace rename (a profile that moved to its own gateway) is committed.
+
+    The rename writes, so on the owner loop it goes to a tracked worker like the compression catch-up.
+    """
+    from gateway.session_local_namespace import HostNamespaceDue, adopt_host_namespace
+    try:
+        return owned_receipt(authority, sid)
+    except HostNamespaceDue as due:
+        from gateway.session_local_adoption import on_owner_loop, schedule_adoption
+        if on_owner_loop():
+            schedule_adoption(authority, sid)
+            raise _CatchUpPending('storage_unavailable')
+        adopt_host_namespace(authority, sid, due.receipt, due.route)
+        return owned_receipt(authority, sid)
 
 
 def _stray_route_target(authority, receipt, session_id):
@@ -140,7 +161,7 @@ def restore_local_session(authority, sid):
     from gateway.session_policy import restore_policy
     try:
         # The catch-up writes, so the receipt as stored must already be this owner's (#140060).
-        receipt, source, route, entry = owned_receipt(authority, sid)
+        receipt, source, route, entry = healed_receipt(authority, sid)
         chat_id, store = source.chat_id, authority.runner.session_store
         adopted = _with_untracked_compression(authority, sid, receipt)
         policy = restore_policy(adopted['policy'])
