@@ -77,11 +77,12 @@ async def test_launch_profile_adopts_its_host_namespace_receipt(tmp_path, monkey
         name = Path(authority.profile_id).name
         old = _age(authority.db, ref.session_id, name, 'beta' if variant == 'foreign' else name)
         authority.sessions.pop(ref.session_id, None)
+        runner.session_store._entries.pop(current, None)  # a cold restart holds no stale entry
 
         if variant == 'taken':  # a stray route already sits under the new key
             def squat(conn):
-                conn.execute("INSERT INTO gateway_routing (scope, session_key, entry_json) "
-                             "SELECT '', ?, entry_json FROM gateway_routing WHERE scope='' AND session_key=?",
+                conn.execute("INSERT INTO gateway_routing (scope, session_key, entry_json, updated_at) "
+                             "SELECT '', ?, entry_json, updated_at FROM gateway_routing WHERE scope='' AND session_key=?",
                              (current, old))
             authority.db._execute_write(squat)
         if variant in ('foreign', 'taken'):
