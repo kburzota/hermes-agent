@@ -679,7 +679,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             # Same key as clarify: a producer turn (Bot Chat, injection) with no responder fails fast;
             # a viewer's own turn keeps waiting so its author can re-attach and approve.
             adapter = self._runner._adapters_for_profile(self._ctx.source.profile).get(Platform.LOCAL)
-            why = getattr(adapter, "no_viewer_can_answer", lambda _id: None)(self._approval_owner[1])
+            why = getattr(adapter, "no_viewer_can_answer", lambda _id, _cap: None)(self._approval_owner[1], "session:approve")
             if why:
                 raise _ExecApprovalDeclined(why)
         if self._approval_owner is not None:

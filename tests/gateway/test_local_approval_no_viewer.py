@@ -13,7 +13,7 @@ def _turn(monkeypatch, subscribers, payload):
     live = SimpleNamespace(event_stream=SimpleNamespace(lock=threading.RLock()), subscribers=subscribers)
     authority = SimpleNamespace(sessions={"s": live}, db=None)
     adapter = SimpleNamespace(authority=authority)
-    adapter.no_viewer_can_answer = lambda cid: LocalSessionAdapter.no_viewer_can_answer(adapter, cid)
+    adapter.no_viewer_can_answer = lambda cid, cap='session:respond': LocalSessionAdapter.no_viewer_can_answer(adapter, cid, cap)
     monkeypatch.setattr("hermes_state_runtime.list_session_admissions",
                         lambda *a, **k: [{"status": "started", "payload": payload}])
     t = object.__new__(TurnRunner)
@@ -44,8 +44,14 @@ def test_viewers_own_turn_without_subscribers_still_waits(monkeypatch):
     assert rendered
 
 
-def test_responder_attached_still_renders(monkeypatch):
-    t = _turn(monkeypatch, {"sub": SimpleNamespace(capabilities={"session:respond"})}, "local_automation_v1")
+def test_approver_attached_still_renders(monkeypatch):
+    t = _turn(monkeypatch, {"sub": SimpleNamespace(capabilities={"session:approve"})}, "local_automation_v1")
     rendered = _stub_render(monkeypatch, t)
     t._approval_notify_sync({"command": "echo x"})
     assert rendered
+
+
+def test_respond_only_subscriber_does_not_count_for_approvals(monkeypatch):
+    t = _turn(monkeypatch, {"sub": SimpleNamespace(capabilities={"session:respond"})}, "local_automation_v1")
+    with pytest.raises(_ExecApprovalDeclined):
+        t._approval_notify_sync({"command": "echo x"})
