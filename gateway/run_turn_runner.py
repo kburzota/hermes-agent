@@ -674,7 +674,17 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 logger.debug("resume_typing_for_chat after clarify answer failed", exc_info=True)
         return response, answered
 
+    def _has_local_viewer(self) -> bool:
+        if self._approval_owner is None:
+            return False
+        authority, session_id, _ = self._approval_owner
+        return bool(authority.sessions[session_id].subscribers)
+
     def _approval_notify_sync(self, approval_data: dict) -> None:
+        if self._ctx.source.platform == Platform.LOCAL and not self._has_local_viewer():
+            # Bot Chat / relayed turns have no human attached: raising takes the notify-failed path, an
+            # instant deny, instead of a card nobody sees that times out after approvals.timeout.
+            raise _ExecApprovalDeclined("no viewer attached to this local session to answer the approval")
         if self._approval_owner is not None:
             authority, session_id, generation = self._approval_owner
             authority.check_approval_generation(session_id, generation)

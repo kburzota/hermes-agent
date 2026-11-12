@@ -711,7 +711,7 @@ _STOP_ACTION = (
 
 _COMMAND_GATE = _GateSpec(
     noun="command", transport=True, user_approved=True, redact_cli=False, pending_keys=True,
-    notify_failed="BLOCKED: Failed to send approval request to user. Do NOT retry.",
+    notify_failed="BLOCKED: Failed to send approval request to user: no approver is reachable from this session; ask your supervisor to run it. Do NOT retry.",
     gateway_refused="BLOCKED: Command {reason}.{reason_addendum}" + _STOP_COMMAND
                     + "{timeout_addendum}{breaker}",
     transport_denied=(
@@ -747,7 +747,7 @@ _EXECUTE_CODE_GATE = _GateSpec(
 # no user_approved marker (parity with the historical gate).
 _ACTION_GATE = _GateSpec(
     noun="action", transport=False, user_approved=False, redact_cli=False, pending_keys=False,
-    notify_failed="BLOCKED: Failed to send approval request to user. Do NOT retry.",
+    notify_failed="BLOCKED: Failed to send approval request to user: no approver is reachable from this session; ask your supervisor to run it. Do NOT retry.",
     gateway_refused="BLOCKED: Action {reason}.{reason_addendum}" + _STOP_ACTION
                     + "{timeout_addendum}",
     transport_denied="",
