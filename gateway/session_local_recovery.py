@@ -109,6 +109,9 @@ def owned_receipt(authority, sid):
         raise ValueError('identity mismatch')
     source = local_source(authority, chat_id, receipt['principal_id'])
     route = authority.runner.session_store._generate_session_key(source)
+    if source.profile is None:  # the launch profile; a served secondary keeps its own namespace
+        from gateway.session_local_namespace import adopt_host_namespace
+        receipt = adopt_host_namespace(authority, sid, receipt, route)
     return receipt, source, route, _checked_entry(authority, receipt, source, route)
 
 
