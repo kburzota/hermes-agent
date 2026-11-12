@@ -22,8 +22,10 @@ def adopt_host_namespace(authority, sid, receipt, route):
     A profile first served by the host gateway keys its local sessions ``agent:<name>:...``; once it
     runs its own gateway (its launch profile) the same DM is ``agent:main:...`` and every restore
     refused with ``route mismatch`` (``storage_unavailable``). Only that exact rename is accepted:
-    same home, same profile in the origin, same remainder of the key. The receipt, the sessions row
-    and the routing entry move in one owner transaction; nothing else changes.
+    same home, same profile in the origin, same remainder of the key. The receipt, every sessions row of its lineage
+    (a compressed or reset chat has several) and the routing entry move in one owner transaction, or
+    none do; nothing else changes. ``delivery_obligations`` and topic bindings are left alone: local
+    sessions never write them (they belong to platform deliveries).
     """
     name = Path(receipt['profile_id']).name
     old = route.replace('agent:main:', f'agent:{name}:', 1)
@@ -32,17 +34,21 @@ def adopt_host_namespace(authority, sid, receipt, route):
         return receipt
     new_receipt = {**receipt, 'route': route, 'entry': _rekeyed(receipt['entry'], route)}
     key = POLICY_PREFIX + sid
+    lineage = receipt.get('lineage', [sid])
 
     def write(conn):
         _epoch(conn, authority.epoch)
         stored = conn.execute('SELECT value FROM state_meta WHERE key=?', (key,)).fetchone()
         if stored is None or json.loads(stored[0]).get('route') != old:
             raise RuntimeStoreError('storage_unavailable')
-        row = conn.execute('SELECT origin_json FROM sessions WHERE id=? AND session_key=?', (sid, old)).fetchone()
-        if row is None:
+        rows = [conn.execute('SELECT origin_json FROM sessions WHERE id=? AND session_key=?', (s, old)).fetchone()
+                for s in lineage]
+        taken = conn.execute("SELECT 1 FROM gateway_routing WHERE scope='' AND session_key=?", (route,)).fetchone()
+        if None in rows or taken is not None:  # all-or-nothing: never leave a half-moved lineage
             raise RuntimeStoreError('storage_unavailable')
-        conn.execute('UPDATE sessions SET session_key=?, origin_json=? WHERE id=?',
-                     (route, _json(_rekeyed(json.loads(row[0]), route)), sid))
+        for s, row in zip(lineage, rows):
+            conn.execute('UPDATE sessions SET session_key=?, origin_json=? WHERE id=?',
+                         (route, _json(_rekeyed(json.loads(row[0]), route)), s))
         routed = conn.execute("SELECT entry_json FROM gateway_routing WHERE scope='' AND session_key=?",
                               (old,)).fetchone()
         if routed is not None:
