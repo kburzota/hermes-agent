@@ -137,6 +137,7 @@ class _KanbanDispatcher:
         self.disabled_corrupt_boards: dict[str, tuple[tuple[str, int | None, int | None], float]] = {}
         self._last_ready_nonempty = False
         self._ready_probed_on_tick = False
+        self._tick_n = 0
 
     def _board_slugs(self) -> list:
         return _board_slugs(self.kb)
@@ -226,7 +227,14 @@ class _KanbanDispatcher:
         """Run one dispatch_once per board. Returns (slug, result) pairs."""
         self._last_ready_nonempty = False
         results = []
-        for slug in self._board_slugs():
+        slugs = self._board_slugs()
+        # Rotate the start board: under the host-wide cap the first board would
+        # refill every freed slot and starve the rest.
+        if slugs:
+            r = self._tick_n % len(slugs)
+            slugs = slugs[r:] + slugs[:r]
+        self._tick_n += 1
+        for slug in slugs:
             need_probe = not self._last_ready_nonempty
             results.append((slug, self.tick_once_for_board(slug, probe_ready=need_probe)))
         self._ready_probed_on_tick = True
