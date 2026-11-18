@@ -35,6 +35,7 @@ from tools.approval_floors import (
     _command_matches_permanent_allowlist, _hardline_block_result, _match_user_deny_rule, _sudo_stdin_block_result,
     _user_deny_block_result,
 )
+from tools.approval_kill_guard import detect_broad_kill
 from tools.approval_gateway_wait import _await_gateway_decision
 from tools.approval_prompt import _present_with_selected_transport, _transport_choice, prompt_dangerous_approval
 from tools.approval_smart import _smart_verdict
@@ -1084,6 +1085,10 @@ def _floor_block(command: str, *, sudo_guard: bool = False) -> dict | None:
     if runtime_target:
         logger.warning("Runtime self-delete block: %s (command: %s)", runtime_target, command[:200])
         return _hardline_block_result(f"recursive/any delete of {runtime_target}", command)
+    broad_kill = detect_broad_kill(command)
+    if broad_kill:
+        logger.warning("Broad kill block: %s (command: %s)", broad_kill, command[:200])
+        return _hardline_block_result(f"broad process kill ({broad_kill}); stop a process by PID or use a full-path -f pattern", command)
     if sudo_guard:
         is_sudo_guess, sudo_guess_desc = _check_sudo_stdin_guard(command)
         if is_sudo_guess:
