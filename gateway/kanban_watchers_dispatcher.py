@@ -30,6 +30,18 @@ def _kbd():
 _CORRUPT_DB_MARKERS = ("file is not a database", "database disk image is malformed")
 
 
+_LIVE_KEYS = ("dispatch_interval_seconds", "max_spawn", "max_in_progress", "failure_limit",
+              "dispatch_stale_timeout_seconds", "reconcile_orphans", "default_assignee",
+              "max_in_progress_per_profile", "review_reserved_slots")
+STALL_WARN_AFTER_SECONDS = 900
+STALL_WARN_EVERY_SECONDS = 300
+
+
+def _live_keys(kanban_cfg: dict) -> tuple:
+    """Config values that feed _DispatcherSettings; a change means re-resolve."""
+    return tuple(repr(kanban_cfg.get(k)) for k in _LIVE_KEYS)
+
+
 @dataclass
 class _DispatcherSettings:
     """``kanban.*`` dispatch settings, read once at boot (restart to apply)."""
@@ -137,6 +149,30 @@ class _KanbanDispatcher:
         self.disabled_corrupt_boards: dict[str, tuple[tuple[str, int | None, int | None], float]] = {}
         self._last_ready_nonempty = False
         self._ready_probed_on_tick = False
+        self._stalled_since: dict[str, float] = {}
+        self._stall_warned_at: dict[str, float] = {}
+
+    def note_board_outcome(self, slug: str, ready: bool, spawned: bool, now: Optional[float] = None) -> bool:
+        """Track boards with spawnable Ready cards but no spawns; WARN after 15 min. Returns True if warned.
+
+        Silent starvation (stale caps, builder budget 0, a skipped board) otherwise
+        leaves cards Ready while the board looks healthy.
+        """
+        now = time.monotonic() if now is None else now
+        if not ready or spawned:
+            self._stalled_since.pop(slug, None)
+            self._stall_warned_at.pop(slug, None)
+            return False
+        since = self._stalled_since.setdefault(slug, now)
+        if now - since < STALL_WARN_AFTER_SECONDS or now - self._stall_warned_at.get(slug, -1e9) < STALL_WARN_EVERY_SECONDS:
+            return False
+        self._stall_warned_at[slug] = now
+        s = self.settings
+        logger.warning(
+            "kanban dispatcher: board %s has spawnable ready cards but 0 spawns for %.0f min "
+            "(max_in_progress=%s per_profile=%s review_reserved=%s; boot-time caps are stale if config changed)",
+            slug, (now - since) / 60, s.max_in_progress, s.max_in_progress_per_profile, s.review_reserved_slots)
+        return True
 
     def _board_slugs(self) -> list:
         return _board_slugs(self.kb)
@@ -202,6 +238,11 @@ class _KanbanDispatcher:
                 result = _kbd().dispatch_once(conn, board=slug, **kwargs)
                 if probe_ready:
                     self._note_ready(conn)
+                try:
+                    ready = _kbd().has_spawnable_ready(conn)
+                except Exception:  # health: allow BLE001 -- probe only; never fail the tick
+                    ready = False
+                self.note_board_outcome(slug, ready, bool(getattr(result, "spawned", None)))
                 return result
         except Exception as exc:
             if self.is_corrupt_board_db_error(exc):
