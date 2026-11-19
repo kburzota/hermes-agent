@@ -28,6 +28,7 @@ from gateway.kanban_watchers_notifier import _KanbanNotification, _notifier_coll
 from gateway.kanban_watchers_dispatcher import (
     _KanbanDispatcher,
     _log_spawn_results,
+    _live_keys,
     _resolve_dispatcher_settings,
 )
 
@@ -281,6 +282,7 @@ class GatewayKanbanWatchersMixin:
         last_capacity_log_at = 0
         results: Optional[list] = None
         dispatcher = _KanbanDispatcher(_kb, settings)
+        live_keys = _live_keys(kanban_cfg)
 
         logger.info("kanban dispatcher: embedded in gateway (interval=%.1fs)", interval)
         while self._running:
@@ -293,6 +295,19 @@ class GatewayKanbanWatchersMixin:
                     logger.info("kanban dispatcher: reaped %d zombie worker(s), pids=%s", len(pids), pids)
             except Exception:
                 logger.exception("kanban dispatcher: zombie reaper failed")
+
+            try:
+                # Caps were read once at boot, so a config edit starved boards
+                # until restart; re-resolve when a dispatch key changes.
+                _cur = (_load_config() or {}).get("kanban", {})
+                if _live_keys(_cur) != live_keys:
+                    live_keys = _live_keys(_cur)
+                    settings = _resolve_dispatcher_settings(_cur, _kb)
+                    dispatcher.settings = settings
+                    interval = settings.interval
+                    logger.info("kanban dispatcher: settings reloaded from config")
+            except Exception:
+                logger.exception("kanban dispatcher: settings reload failed; keeping old settings")
 
             try:
                 # Emergency stop (`hermes pause`): no auto-decompose or
