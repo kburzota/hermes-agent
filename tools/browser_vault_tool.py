@@ -301,7 +301,7 @@ def browser_vault_save_login(label: str = "", task_id: Optional[str] = None) -> 
     if not origin:
         return json.dumps({"success": False, "error": "Open the site's login page first; the login is saved for that page's origin."})
     prompt = get_save_login_prompt_callback()
-    if prompt is None or not can_prompt_here():
+    if prompt is None or not can_prompt_here(get_save_login_prompt_callback):
         return json.dumps({"success": False, "error_type": "prompt_unavailable",
                            "error": (f"This session cannot ask the user for a login (headless/cron/API). Tell them to run "
                                      f"`hermes vault add` or use Desktop → Settings → Passwords & Logins for {origin}.")})
@@ -371,7 +371,7 @@ def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) ->
             source = backend.name
     if not code:
         prompt = get_code_prompt_callback()
-        if prompt is None or not can_prompt_here():
+        if prompt is None or not can_prompt_here(get_code_prompt_callback):
             return json.dumps({"success": False, "error_type": "prompt_unavailable",
                                "error": (f"{site} asks for a one-time code and this session cannot ask the user (headless/cron/API). "
                                          "Save an authenticator key for this login so codes can be generated automatically.")})
