@@ -159,9 +159,11 @@ def is_unlocked(backend: str) -> bool:
     return _live(backend, touch=False) is not None
 
 
-def can_prompt_here() -> bool:
-    """False in contexts where no human can answer (cron, webhook, api_server, -q)."""
+def can_prompt_here(getter: Callable[[], object] = get_unlock_prompt_callback) -> bool:
+    """False in contexts where no human can answer (cron, webhook, api_server, -q), or when the surface
+    installed no prompt of the kind the caller needs (``getter``: unlock by default; a Desktop chat that
+    only wires the code prompt must still be able to ask for a code)."""
     from tools.approval_context import _no_user_can_answer
     if _no_user_can_answer():
         return False
-    return get_unlock_prompt_callback() is not None
+    return getter() is not None
