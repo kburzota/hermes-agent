@@ -834,7 +834,11 @@ class AuthorityConnection:
 
         def entitled(session_id, events):
             # The same rule ``clarify.lock`` applies to the same request id (attached + respond).
-            return may_settle(self.authority, self.actor, session_id, events)
+            # A response frame carries no ``profile``, so it can't be routed like a verb: on a
+            # host-scoped socket the viewer attached to a sibling profile's session through that
+            # sibling connection, and only its authority and actor own the stream.
+            return any(may_settle(c.authority, c.actor, session_id, events)
+                       for c in (self, *self._siblings.values()))
         if not resolve(frame, session_ok=entitled):
             import logging
             logging.getLogger(__name__).debug('dropping response for unknown server request id=%r', frame.get('id'))
