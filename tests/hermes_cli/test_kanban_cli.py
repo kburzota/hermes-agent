@@ -293,8 +293,6 @@ def test_run_slash_reclaim_running_task(kanban_home):
 # ---------------------------------------------------------------------------
 
 
-
-
 def test_kanban_create_toolset_pin_round_trips(kanban_home):
     """``--toolset`` (repeatable) pins the worker's toolsets; show surfaces the pin."""
     tid = kc.run_slash("create 'lean card' --assignee alice --toolset terminal --toolset file --json")

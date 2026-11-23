@@ -96,6 +96,8 @@ def test_card_toolset_pin_narrows_worker_and_refuses_wider(tmp_path, monkeypatch
         policy()
     with closing(connect(board='lean')) as conn, pytest.raises(ValueError, match='unknown toolset'):
         kb.create_task(conn, title='typo', assignee='default', toolsets=['termnal'])
+    with closing(connect(board='lean')) as conn, pytest.raises(ValueError, match='unknown toolset'):
+        kb.create_task(conn, title='case', assignee='default', toolsets=['Terminal'])
 
 
 @pytest.mark.parametrize('mode', ['complete', 'timeout', 'rate_limit', 'billing', 'crash', 'restart'])

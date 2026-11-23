@@ -1231,7 +1231,8 @@ def _normalize_task_toolsets(toolsets: Optional[Iterable[str]]) -> Optional[list
         return None
     cleaned = list(dict.fromkeys(str(t).strip() for t in toolsets if t and str(t).strip()))
     # shortcut: MCP-server toolsets register only after their first connect, so they can't be pinned here yet.
-    unknown = [t for t in cleaned if t.casefold() not in KNOWN_TOOLSET_NAMES]
+    names = set(get_toolset_names())  # exact match: resolution downstream is case-sensitive
+    unknown = [t for t in cleaned if t not in names]
     if unknown:
         raise ValueError(f"unknown toolset name(s): {', '.join(map(repr, unknown))}")
     return cleaned or None
