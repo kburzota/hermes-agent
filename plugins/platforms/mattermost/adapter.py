@@ -123,6 +123,7 @@ class MattermostAdapter(BasePlatformAdapter):
         self._last_post_status: Optional[int] = None  # POST-only, read by the broken-thread-root fallback
         self._last_post_error: str = ""
         self._dedup = MessageDeduplicator()
+        self._last_seen_ms: Optional[int] = None
 
     # --- HTTP helpers ---
 
@@ -478,6 +479,10 @@ class MattermostAdapter(BasePlatformAdapter):
         self._ws = await self._session.ws_connect(ws_url, heartbeat=30.0)
         await self._ws.send_json({"seq": 1, "action": "authentication_challenge", "data": {"token": self._token}})
         logger.info("Mattermost: WebSocket connected and authenticated")
+        try:
+            await self._catch_up()
+        except Exception as exc:  # best effort: a failed catch-up must not drop the live connection
+            logger.warning("Mattermost: catch-up of missed posts failed: %s", exc)
 
         async for raw_msg in self._ws:
             if self._closing:
@@ -492,6 +497,7 @@ class MattermostAdapter(BasePlatformAdapter):
             elif kind in {kind.ERROR, kind.CLOSE, kind.CLOSING, kind.CLOSED}:
                 logger.info("Mattermost: WebSocket closed (%s)", kind)
                 break
+        logger.info("Mattermost: WebSocket listener ended, reconnecting")  # aiohttp ends `async for` silently on close
 
     async def _bot_in_thread(self, root_id: str) -> bool:
         """True if this bot authored the thread root or any reply. Stateless (asks the server), so it survives restarts."""
@@ -576,7 +582,81 @@ class MattermostAdapter(BasePlatformAdapter):
                 logger.warning("Mattermost: error downloading file %s: %s", fid, exc)
         return media_urls, media_types
 
+    # Posts that arrive while the WebSocket is down or the process is restarting are never pushed again. Remember the
+    # newest handled post's create_at (persisted per bot) and on every connect fetch what came after it.
+    _CATCHUP_MAX_AGE_MS = 24 * 3600 * 1000  # shortcut: a longer outage replays only the last day; raise if that ever bites
+
+    def _watermark_path(self) -> Path:
+        from hermes_constants import get_hermes_home
+        return Path(get_hermes_home()) / "mattermost-last-seen.json"
+
+    def _load_watermark(self) -> int:
+        if self._last_seen_ms is None:
+            try:
+                self._last_seen_ms = int(json.loads(self._watermark_path().read_text())[self._bot_user_id])
+            except (OSError, ValueError, KeyError, TypeError):
+                self._last_seen_ms = 0
+        return self._last_seen_ms
+
+    def _advance_watermark(self, create_at: int) -> None:
+        if create_at <= self._load_watermark():
+            return
+        self._last_seen_ms = create_at
+        path = self._watermark_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({self._bot_user_id: create_at}))
+            tmp.replace(path)
+        except OSError as exc:  # in-memory watermark still covers reconnects; only a restart loses it
+            logger.warning("Mattermost: could not save last-seen watermark: %s", exc)
+
+    async def _catch_up(self) -> None:
+        """Replay posts made since the watermark through the normal handler (dedup, gating, allowlist all apply)."""
+        import time
+        now_ms = int(time.time() * 1000)
+        mark = self._load_watermark()
+        if not mark:  # first run ever: nothing to catch up on, start the clock
+            self._advance_watermark(now_ms)
+            return
+        since = max(mark, now_ms - self._CATCHUP_MAX_AGE_MS)
+        channels: dict[str, dict[str, Any]] = {}
+        # _api_get turns any HTTP error into {}; raise instead of reading that as "no posts", or one failed fetch would
+        # let the watermark skip past that channel's missed posts. The outer except logs it and the next connect retries.
+        teams = await self._api_get("users/me/teams")
+        if not isinstance(teams, list):
+            raise RuntimeError("teams fetch failed")
+        for team in teams:
+            chs = await self._api_get(f"users/me/teams/{team['id']}/channels")
+            if not isinstance(chs, list):
+                raise RuntimeError("channels fetch failed")
+            channels.update({ch["id"]: ch for ch in chs})
+        missed, names = [], {}
+        for ch in channels.values():
+            if (ch.get("last_post_at") or 0) <= since:
+                continue
+            data = await self._api_get(f"channels/{ch['id']}/posts?since={since}")
+            if "posts" not in data:
+                raise RuntimeError(f"posts fetch failed for channel {ch['id']}")
+            for post in (data["posts"] or {}).values():
+                if post.get("create_at", 0) > since and not post.get("delete_at"):  # since= also returns edits
+                    missed.append((post, ch.get("type", "O")))
+        for post, ctype in sorted(missed, key=lambda m: m[0]["create_at"]):
+            uid = post.get("user_id", "")
+            if uid not in names:
+                names[uid] = "@" + ((await self._api_get(f"users/{uid}")).get("username") or uid)
+            await self._handle_ws_event({"event": "posted", "data": {"post": json.dumps(post), "channel_type": ctype, "sender_name": names[uid]}})
+        logger.info("Mattermost: caught up %d post(s) missed since the last connection", len(missed))
+
     async def _handle_ws_event(self, event: dict[str, Any]) -> None:
+        await self._handle_post_event(event)
+        if event.get("event") == "posted":  # advance only after the post was handled, so a crash mid-handling is replayed
+            try:
+                self._advance_watermark(int(json.loads(event["data"]["post"]).get("create_at", 0)))
+            except (KeyError, ValueError, TypeError):
+                pass
+
+    async def _handle_post_event(self, event: dict[str, Any]) -> None:
         if event.get("event") != "posted":
             return
         data = event.get("data", {})
