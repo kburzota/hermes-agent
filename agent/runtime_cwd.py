@@ -107,6 +107,20 @@ def resolve_agent_cwd() -> Path:
     return _resolve_configured_cwd(override_is_final=False) or Path(os.getcwd())
 
 
+# A kanban worker's cwd is its per-card workspace; naming it in the system prompt made every card's
+# prompt unique and forced a full cache write per card (T233). The task message carries the path.
+KANBAN_CWD_PLACEHOLDER = "$HERMES_KANBAN_WORKSPACE (this card's workspace; the task message gives its path)"
+
+
+def prompt_cwd(cwd: Path | str) -> str:
+    """``cwd`` as the system prompt's ``Current working directory`` shows it: the stable kanban
+    placeholder when it is the bound worker's own workspace, else the path itself."""
+    ws = os.environ.get("HERMES_KANBAN_WORKSPACE", "").strip()
+    if ws and str(cwd) and os.environ.get("HERMES_KANBAN_TASK") and os.path.realpath(ws) == os.path.realpath(cwd):
+        return KANBAN_CWD_PLACEHOLDER
+    return str(cwd)
+
+
 def resolve_context_cwd(*, include_session_override: bool = True) -> Path | None:
     """Configured cwd for context-file discovery, or None (build_context_files_prompt then falls back to the
     launch dir). An existing configured path is honored verbatim — including the Hermes source tree, a

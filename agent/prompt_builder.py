@@ -20,7 +20,7 @@ from hermes_constants import (
 )
 
 from agent.model_metadata import CHARS_PER_TOKEN
-from agent.runtime_cwd import resolve_agent_cwd
+from agent.runtime_cwd import prompt_cwd, resolve_agent_cwd
 from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS,
     TIER_LOCAL, extract_skill_conditions, extract_skill_description, get_disabled_skill_names, get_skill_search_roots,
@@ -925,7 +925,7 @@ def _local_host_hints() -> list[str]:
     )
     host_lines = [f"Host: {host}", f"User home directory: {os.path.expanduser('~')}"]
     try:
-        host_lines.append(f"Current working directory: {resolve_agent_cwd()}")
+        host_lines.append(f"Current working directory: {prompt_cwd(resolve_agent_cwd())}")
     except OSError:
         pass
     # The model reaches for the system temp dir by reflex (tmpfs on most Linux hosts, fills RAM);

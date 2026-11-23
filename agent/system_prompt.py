@@ -26,7 +26,7 @@ from agent.prompt_builder import (
     TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, drain_truncation_warnings,
 )
 from agent import prompt_builder as _pb
-from agent.runtime_cwd import resolve_agent_cwd, resolve_context_cwd
+from agent.runtime_cwd import prompt_cwd, resolve_agent_cwd, resolve_context_cwd
 from hermes_constants import get_default_hermes_root, get_hermes_home
 from utils import is_truthy_value
 
@@ -654,7 +654,7 @@ def _seed_workspace_pin(agent: Any, key: str) -> None:
     if not prompt:
         return
     stored_cwd = runtime_host_value(prompt, "Current working directory")
-    if stored_cwd and stored_cwd != key:
+    if stored_cwd and stored_cwd not in (key, prompt_cwd(key)):
         return
     block = _persisted_workspace_block(prompt, key)
     # Only a real snapshot is adopted: a prompt without one (built on a surface without the
