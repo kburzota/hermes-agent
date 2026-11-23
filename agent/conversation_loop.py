@@ -30,7 +30,7 @@ from agent.prompt_caching import (
     strip_anthropic_tool_cache_control,
 )
 from agent.repetition_guard import REPETITION_LOOP_INTERRUPTED, is_runaway_repetition
-from agent.runtime_cwd import resolve_agent_cwd
+from agent.runtime_cwd import prompt_cwd, resolve_agent_cwd
 from agent.surface_switch import (
     identity_line_value, note_inert_pinned_tools, runtime_host_value, stage_surface_switch_note,
 )
@@ -978,7 +978,7 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     # Compare against resolve_agent_cwd() — the SAME resolver used to build the
     # prompt — so TERMINAL_CWD sessions are not falsely rejected.
     stored_cwd = runtime_host_value(prompt, "Current working directory")
-    if stored_cwd and stored_cwd != str(resolve_agent_cwd()):
+    if stored_cwd and stored_cwd != prompt_cwd(resolve_agent_cwd()):
         return False
     # Platform is deliberately NOT an identity field: a surface switch does not invalidate the
     # stored bytes, it only makes their interface section out of date, and that is corrected by

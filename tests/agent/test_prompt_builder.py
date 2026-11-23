@@ -690,6 +690,40 @@ class TestEnvironmentHints:
         _pb._BACKEND_PROBE_CACHE.clear()
         assert f"Current working directory: {configured}" in _pb.build_environment_hints()
 
+    def test_kanban_worker_cwd_is_a_stable_placeholder(self, monkeypatch, tmp_path):
+        """T233: two cards' workspaces must render identical hints so the cached system prompt is
+        shared; the stored-prompt cwd check still matches its own card and rejects a foreign cwd."""
+        import agent.prompt_builder as _pb
+        from agent.conversation_loop import _stored_prompt_matches_runtime
+        from agent.runtime_cwd import KANBAN_CWD_PLACEHOLDER
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_x")
+        rendered = []
+        for name in ("t_a", "t_b"):
+            ws = tmp_path / name
+            ws.mkdir()
+            monkeypatch.setenv("TERMINAL_CWD", str(ws))
+            monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(ws))
+            _pb._BACKEND_PROBE_CACHE.clear()
+            rendered.append(_pb.build_environment_hints())
+        assert rendered[0] == rendered[1]
+        assert f"Current working directory: {KANBAN_CWD_PLACEHOLDER}" in rendered[0]
+        assert str(tmp_path / "t_a") not in rendered[0]
+        agent = __import__("types").SimpleNamespace(model="", provider="", session_id="s", pass_session_id=False)
+        prompt = f"BODY\n\n{_pb.RUNTIME_ENVIRONMENT_HEADING}\n\n{rendered[1]}\n\n{_pb.RUNTIME_ENVIRONMENT_END}"
+        assert _stored_prompt_matches_runtime(agent, prompt)
+        # Off its workspace (the worker cd'd elsewhere for the session cwd) the real path shows again.
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.setenv("TERMINAL_CWD", str(elsewhere))
+        assert not _stored_prompt_matches_runtime(agent, prompt)
+        assert f"Current working directory: {elsewhere}" in _pb.build_environment_hints()
+        # Not a kanban worker: the path, never the placeholder.
+        monkeypatch.delenv("HERMES_KANBAN_TASK")
+        monkeypatch.setenv("TERMINAL_CWD", str(tmp_path / "t_a"))
+        assert f"Current working directory: {tmp_path / 't_a'}" in _pb.build_environment_hints()
+
     def test_build_environment_hints_falls_back_to_launch_dir(self, monkeypatch, tmp_path):
         """The #19242 local-CLI contract: no TERMINAL_CWD → the launch dir."""
         import agent.prompt_builder as _pb
