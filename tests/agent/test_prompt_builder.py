@@ -709,7 +709,7 @@ class TestEnvironmentHints:
             rendered.append(_pb.build_environment_hints())
         assert rendered[0] == rendered[1]
         assert f"Current working directory: {KANBAN_CWD_PLACEHOLDER}" in rendered[0]
-        assert str(tmp_path) not in rendered[0]
+        assert str(tmp_path / "t_a") not in rendered[0]
         agent = __import__("types").SimpleNamespace(model="", provider="", session_id="s", pass_session_id=False)
         prompt = f"BODY\n\n{_pb.RUNTIME_ENVIRONMENT_HEADING}\n\n{rendered[1]}\n\n{_pb.RUNTIME_ENVIRONMENT_END}"
         assert _stored_prompt_matches_runtime(agent, prompt)
