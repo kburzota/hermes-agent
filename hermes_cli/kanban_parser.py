@@ -193,6 +193,10 @@ _SPECS = [
              help="Skill to force-load into the worker (repeatable). The kanban "
                   "lifecycle is already injected automatically. Example: --skill "
                   "translation --skill github-code-review"),
+        _arg("--toolset", action="append", default=[], dest="toolsets",
+             help="Run the worker with only this toolset (repeatable; kanban is always "
+                  "added). Omit to use the profile's toolsets. Example: --toolset terminal "
+                  "--toolset file"),
         _arg("--max-retries", type=int, metavar="N",
              help="Per-task override for the consecutive-failure "
                   f"circuit breaker. Trip on the Nth failure — e.g. --max-retries 1 blocks on the "

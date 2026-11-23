@@ -54,6 +54,50 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
         build_policy({'source': 'kanban', 'cwd': str(workspace)}, config)
 
 
+def test_card_toolset_pin_narrows_worker_and_refuses_wider(tmp_path, monkeypatch):
+    """A card's --toolset pin replaces the profile's set (kanban still added); a toolset the
+    profile doesn't offer is refused at claim, never silently granted."""
+    from contextlib import closing
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect
+    from gateway.session_contract import Principal
+    from gateway.session_kanban import build_kanban_policy
+    from hermes_state_runtime import RuntimeStoreError
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    monkeypatch.delenv('HERMES_KANBAN_DB', raising=False)
+    monkeypatch.delenv('HERMES_DELEGATED_CHILD', raising=False)
+    monkeypatch.setattr('hermes_cli.profiles.resolve_profile_env', lambda name: str(tmp_path))
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    kb.create_board('lean')
+    config = {'model': {'default': 'm', 'provider': 'custom'},
+              'platform_toolsets': {'cli': ['terminal', 'file', 'web', 'browser', 'memory', 'skills', 'kanban']}}
+    actor = Principal('owner', str(tmp_path), frozenset({'session:create'}), 'transport')
+    connection = SimpleNamespace(authority=SimpleNamespace(profile_id=str(tmp_path)), actor=actor, native_owner=True)
+
+    def claimed_policy(**pin):
+        with closing(connect(board='lean')) as conn:
+            tid = kb.create_task(conn, title='Rebase', assignee='default', workspace_kind='dir',
+                                 workspace_path=str(workspace), **pin)
+            kb.recompute_ready(conn)
+            task = kb.claim_task(conn, tid)
+        params = dict(board='lean', task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock)
+        return task, (lambda: build_kanban_policy(connection, params, config)[0])
+
+    task, policy = claimed_policy(toolsets=['terminal', 'file', 'terminal'])
+    assert task.toolsets == ['terminal', 'file']
+    assert set(policy().toolsets) == {'terminal', 'file', 'kanban'}
+    _task, policy = claimed_policy()
+    assert {'web', 'browser', 'memory', 'skills'} <= set(policy().toolsets)  # no pin: profile's set
+    _task, policy = claimed_policy(toolsets=['terminal', 'vision'])  # not in the profile: never widened
+    with pytest.raises(RuntimeStoreError, match='invalid_kanban_claim'):
+        policy()
+    with closing(connect(board='lean')) as conn, pytest.raises(ValueError, match='unknown toolset'):
+        kb.create_task(conn, title='typo', assignee='default', toolsets=['termnal'])
+
+
 @pytest.mark.parametrize('mode', ['complete', 'timeout', 'rate_limit', 'billing', 'crash', 'restart'])
 def test_real_dispatcher_lifecycle(tmp_path, mode):
     import os
