@@ -621,15 +621,24 @@ class MattermostAdapter(BasePlatformAdapter):
             return
         since = max(mark, now_ms - self._CATCHUP_MAX_AGE_MS)
         channels: dict[str, dict[str, Any]] = {}
-        for team in await self._api_get("users/me/teams") or []:
-            for ch in await self._api_get(f"users/me/teams/{team['id']}/channels") or []:
-                channels[ch["id"]] = ch
+        # _api_get turns any HTTP error into {}; raise instead of reading that as "no posts", or one failed fetch would
+        # let the watermark skip past that channel's missed posts. The outer except logs it and the next connect retries.
+        teams = await self._api_get("users/me/teams")
+        if not isinstance(teams, list):
+            raise RuntimeError("teams fetch failed")
+        for team in teams:
+            chs = await self._api_get(f"users/me/teams/{team['id']}/channels")
+            if not isinstance(chs, list):
+                raise RuntimeError("channels fetch failed")
+            channels.update({ch["id"]: ch for ch in chs})
         missed, names = [], {}
         for ch in channels.values():
             if (ch.get("last_post_at") or 0) <= since:
                 continue
             data = await self._api_get(f"channels/{ch['id']}/posts?since={since}")
-            for post in (data.get("posts") or {}).values():
+            if "posts" not in data:
+                raise RuntimeError(f"posts fetch failed for channel {ch['id']}")
+            for post in (data["posts"] or {}).values():
                 if post.get("create_at", 0) > since and not post.get("delete_at"):  # since= also returns edits
                     missed.append((post, ch.get("type", "O")))
         for post, ctype in sorted(missed, key=lambda m: m[0]["create_at"]):

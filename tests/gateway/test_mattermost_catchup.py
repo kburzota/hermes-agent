@@ -108,3 +108,19 @@ async def test_connect_runs_catch_up_and_survives_its_failure(monkeypatch, tmp_p
     a._catch_up = AsyncMock(side_effect=RuntimeError("server unreachable"))
     await a._ws_connect_and_listen()  # must return normally so _ws_loop reconnects
     assert a._catch_up.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_channel_fetch_replays_nothing_and_keeps_the_watermark(monkeypatch, tmp_path):
+    a = _adapter(monkeypatch, tmp_path)
+    a._advance_watermark(T0 + 1000)
+    chans = [{"id": "A", "type": "D", "last_post_at": T0 + 4000}, {"id": "B", "type": "D", "last_post_at": T0 + 6000}]
+    _serve(a, chans, [_post("b", T0 + 5000)])
+    ok = a._api_get
+
+    async def flaky(path):
+        return {} if path.startswith("channels/A/") else await ok(path)  # _api_get's shape for a 4xx/5xx
+    a._api_get = flaky
+    with pytest.raises(RuntimeError):
+        await a._catch_up()
+    assert not a.handle_message.called and a._last_seen_ms == T0 + 1000
