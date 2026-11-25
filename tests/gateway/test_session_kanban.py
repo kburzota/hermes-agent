@@ -94,6 +94,15 @@ def test_card_toolset_pin_narrows_worker_and_refuses_wider(tmp_path, monkeypatch
     _task, policy = claimed_policy(toolsets=['terminal', 'vision'])  # not in the profile: never widened
     with pytest.raises(RuntimeStoreError, match='invalid_kanban_claim'):
         policy()
+    # A row written straight to the DB naming an MCP server the profile excludes must not widen the worker.
+    narrow = {**config, 'platform_toolsets': {'cli': ['terminal', 'file', 'no_mcp']}, 'mcp_servers': {'evil': {'command': 'x'}}}
+    task, _policy = claimed_policy()
+    with closing(connect(board='lean')) as conn:
+        conn.execute('UPDATE tasks SET toolsets=? WHERE id=?', ('["evil"]', task.id))
+        conn.commit()
+    params = dict(board='lean', task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock)
+    with pytest.raises(RuntimeStoreError, match='invalid_kanban_claim'):
+        build_kanban_policy(connection, params, narrow)
     with closing(connect(board='lean')) as conn, pytest.raises(ValueError, match='unknown toolset'):
         kb.create_task(conn, title='typo', assignee='default', toolsets=['termnal'])
     with closing(connect(board='lean')) as conn, pytest.raises(ValueError, match='unknown toolset'):

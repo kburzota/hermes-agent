@@ -54,9 +54,13 @@ def build_kanban_policy(connection, params, config):
         # A card may only narrow the profile's tools: build_policy takes an explicit list as the whole set.
         from hermes_cli.tools_config import _get_platform_tools
         from toolsets import resolve_toolset
-        allowed = {t for name in _get_platform_tools(config, 'cli') | {'kanban'} for t in resolve_toolset(name)}
-        if not {t for name in task.toolsets for t in resolve_toolset(name)} <= allowed:
-            raise RuntimeStoreError('invalid_kanban_claim')
+        profile = _get_platform_tools(config, 'cli') | {'kanban'}
+        allowed = {t for name in profile for t in resolve_toolset(name)}
+        for name in task.toolsets:
+            tools = set(resolve_toolset(name))
+            # An empty resolution (e.g. an MCP server name) passes any subset test, so it must already be in the profile.
+            if name not in profile and (not tools or not tools <= allowed):
+                raise RuntimeStoreError('invalid_kanban_claim')
         params_policy['toolsets'] = list(task.toolsets)
     for name, value in (('model', task.model_override), ('provider', task.provider_override), ('reasoning', task.reasoning_effort)):
         if value:
