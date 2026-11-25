@@ -103,6 +103,12 @@ def test_card_toolset_pin_narrows_worker_and_refuses_wider(tmp_path, monkeypatch
     params = dict(board='lean', task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock)
     with pytest.raises(RuntimeStoreError, match='invalid_kanban_claim'):
         build_kanban_policy(connection, params, narrow)
+    # A built-ins-only pin must not inherit MCP servers the profile excludes (no_mcp) or doesn't allowlist.
+    for tools in (['terminal', 'file', 'no_mcp'], ['terminal', 'file', 'good']):
+        mcp = {**config, 'platform_toolsets': {'cli': tools}, 'mcp_servers': {'evil': {'command': 'x'}, 'good': {'command': 'x'}}}
+        task, _policy = claimed_policy(toolsets=['terminal'])
+        params = dict(board='lean', task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock)
+        assert not {'evil', 'good'} & set(build_kanban_policy(connection, params, mcp)[0].toolsets)
     with closing(connect(board='lean')) as conn, pytest.raises(ValueError, match='unknown toolset'):
         kb.create_task(conn, title='typo', assignee='default', toolsets=['termnal'])
     with closing(connect(board='lean')) as conn, pytest.raises(ValueError, match='unknown toolset'):
