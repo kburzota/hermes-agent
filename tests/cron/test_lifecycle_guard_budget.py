@@ -110,6 +110,29 @@ def test_remote_read_budget_charged_before_remote_read(monkeypatch):
     assert [Path(p) for p in reads] == [Path("/remote/a.sh").resolve()]
 
 
+def _script_with_bogus_paths(n: int) -> str:
+    # Path-like first words: a Python CLI's docstrings, comments and quoted strings tokenize this way.
+    return "".join(f"./word{i}.sh x\n" for i in range(n))
+
+
+def test_executed_script_with_68_bogus_paths_is_within_default_remote_budget():
+    reads: list[str] = []
+
+    def remote(path: str):
+        reads.append(path)
+        return _script_with_bogus_paths(68) if path.endswith("big-cli") else None
+
+    assert guard("/remote/big-cli selftest", cwd="/remote", read_remote_script=remote) is False
+    assert len(reads) == 69  # the script plus one miss per bogus path
+
+
+def test_default_remote_budget_still_fails_closed_on_a_runaway_script():
+    def remote(path: str):
+        return _script_with_bogus_paths(300) if path.endswith("big-cli") else None
+
+    assert guard("/remote/big-cli selftest", cwd="/remote", read_remote_script=remote) is True
+
+
 def test_cumulative_text_budget_bounds_recursive_scan(monkeypatch, tmp_path):
     """Two scripts individually under the per-file cap exceed the walk cap.
 
