@@ -50,11 +50,29 @@ def build_kanban_policy(connection, params, config):
         raise RuntimeStoreError('invalid_kanban_claim') from exc
     cwd = task.workspace_path
     params_policy = {'source': 'cli', 'cwd': cwd}
+    if task.toolsets:
+        # A card may only narrow the profile's tools: build_policy takes an explicit list as the whole set.
+        from hermes_cli.tools_config import _get_platform_tools
+        from toolsets import resolve_toolset
+        profile = _get_platform_tools(config, 'cli') | {'kanban'}
+        allowed = {t for name in profile for t in resolve_toolset(name)}
+        for name in task.toolsets:
+            tools = set(resolve_toolset(name))
+            # An empty resolution (e.g. an MCP server name) passes any subset test, so it must already be in the profile.
+            if name not in profile and (not tools or not tools <= allowed):
+                raise RuntimeStoreError('invalid_kanban_claim')
+        configured = config.get('mcp_servers') if isinstance(config.get('mcp_servers'), dict) else {}
+        pin = list(task.toolsets)
+        if not any(n in configured or (n.startswith('mcp-') and n[4:] in configured) for n in pin):
+            pin.append('no_mcp')  # a built-ins-only pin must not inherit every MCP server the profile excludes
+        params_policy['toolsets'] = pin
     for name, value in (('model', task.model_override), ('provider', task.provider_override), ('reasoning', task.reasoning_effort)):
         if value:
             params_policy[name] = value
     private = {}
     policy = build_policy(params_policy, config, private_secrets=private)
+    if task.toolsets and not set(policy.toolsets) <= profile:
+        raise RuntimeStoreError('invalid_kanban_claim')
     if policy.model is None:
         from gateway.run import _resolve_gateway_model
         policy = replace(policy, model=_resolve_gateway_model(policy.config()))

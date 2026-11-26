@@ -369,6 +369,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             parents=tuple(args.parent or ()), triage=bool(getattr(args, "triage", False)),
             idempotency_key=getattr(args, "idempotency_key", None),
             max_runtime_seconds=max_runtime, skills=getattr(args, "skills", None) or None,
+            toolsets=getattr(args, "toolsets", None) or None,
             max_retries=max_retries, model_override=getattr(args, "model_override", None),
             provider_override=getattr(args, "provider_override", None),
             goal_mode=bool(getattr(args, "goal_mode", False)),
@@ -514,6 +515,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
         field("branch", task.branch_name)
     if task.skills:
         field("skills", ", ".join(task.skills))
+    if task.toolsets:
+        field("toolsets", ", ".join(task.toolsets))
     if task.model_override:
         _prov = f" (provider: {task.provider_override})" if task.provider_override else ""
         field("model", f"{task.model_override}{_prov}")
